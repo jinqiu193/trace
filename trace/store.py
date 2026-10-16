@@ -522,7 +522,7 @@ class Store:
             for chunk in _chunked(ids):
                 marks = ",".join("?" * len(chunk))
                 rows = self.db.execute(
-                    f"SELECT file_id, path, name, file_type, mtime FROM files WHERE file_id IN ({marks})",
+                    f"SELECT file_id, path, name, file_type, mtime, size FROM files WHERE file_id IN ({marks})",
                     chunk,
                 ).fetchall()
                 for r in rows:

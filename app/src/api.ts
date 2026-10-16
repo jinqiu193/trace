@@ -45,6 +45,8 @@ export interface VideoHit {
   score: number;
 }
 
+export type SortKey = "relevance" | "mtime_desc" | "mtime_asc" | "size_desc" | "name";
+
 export interface SearchResult {
   score: number;
   path: string;
@@ -57,6 +59,7 @@ export interface SearchResult {
   keyword_rank: number | null;
   snippet: string;
   mtime: number;
+  size?: number;
   strong: boolean;
   weak_fallback?: boolean;
   fuzzy_match?: boolean;
@@ -69,6 +72,8 @@ export interface SearchResponse {
   query: string;
   ms: number;
   results: SearchResult[];
+  facets?: Record<string, number>;
+  mode?: string;
 }
 
 export interface IndexStats {
@@ -129,11 +134,29 @@ export const api = {
   },
   status: () => json<StatusResponse>("GET", "/api/status"),
   doctor: () => json<StatusResponse & { checks: { name: string; exists: boolean; size_mb: number; path: string }[] }>("GET", "/api/doctor"),
-  search: (query: string, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; threshold?: number }) =>
+  search: (query: string, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; threshold?: number; sort?: SortKey }) =>
     json<SearchResponse>("POST", "/api/search", {
       query, limit: opts?.limit ?? 10, offset: opts?.offset ?? 0,
       file_type: opts?.file_type, dir: opts?.dir, threshold: opts?.threshold,
+      sort: opts?.sort ?? "relevance",
     }),
+  /** 以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索 */
+  searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey }) => {
+    const b = await base();
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    fd.append("limit", String(opts?.limit ?? 20));
+    fd.append("offset", String(opts?.offset ?? 0));
+    fd.append("sort", opts?.sort ?? "relevance");
+    if (opts?.file_type) fd.append("file_type", opts.file_type);
+    if (opts?.dir) fd.append("dir", opts.dir);
+    const r = await fetch(`${b}/api/search/image`, { method: "POST", body: fd });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`POST /api/search/image → ${r.status}: ${txt}`);
+    }
+    return r.json() as Promise<SearchResponse>;
+  },
   /** 提交后台索引任务（立即返回，进度走 indexStatus 轮询） */
   index: (path: string, full = false) =>
     json<{ ok: boolean; path: string; task: TaskBrief }>("POST", "/api/index", { path, full }),

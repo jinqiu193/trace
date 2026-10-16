@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -59,11 +59,12 @@ class State:
 
 class SearchBody(BaseModel):
     query: str = Field(..., min_length=1)
-    limit: int = 10
+    limit: int = 20
     offset: int = 0                       # 分页偏移（2026-10-16）
     file_type: Optional[str] = None
     dir: Optional[str] = None
     threshold: Optional[float] = None     # z-gate 门限（0=用默认 2.0）
+    sort: str = "relevance"               # relevance/mtime_desc/mtime_asc/size_desc/name
 
 
 class IndexBody(BaseModel):
@@ -171,7 +172,56 @@ def search(body: SearchBody) -> dict:
                               offset=max(0, body.offset),
                               file_type=body.file_type,
                               dir_filter=body.dir,
-                              z_gate=body.threshold)
+                              z_gate=body.threshold,
+                              sort=body.sort,
+                              with_facets=True)
+
+
+_MAX_UPLOAD_MB = 30
+
+
+@app.post("/api/search/image")
+async def search_image(
+    file: UploadFile = File(...),
+    limit: int = Form(20),
+    offset: int = Form(0),
+    file_type: Optional[str] = Form(None),
+    dir: Optional[str] = Form(None),
+    sort: str = Form("relevance"),
+) -> dict:
+    """以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索。"""
+    import io
+    import time as _time
+
+    from PIL import Image, ImageOps
+
+    from .search import search_by_image
+
+    s = _state()
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty upload")
+    if len(data) > _MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"image too large (> {_MAX_UPLOAD_MB}MB)")
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        img = ImageOps.exif_transpose(img)
+    except Exception as e:
+        raise HTTPException(400, f"cannot decode image: {e}")
+
+    embedder = s.get_embedder()
+    if getattr(embedder, "vision_session", None) is None:
+        raise HTTPException(503, "vision encoder not available (model missing)")
+
+    t0 = _time.time()
+    r = search_by_image(s.store, embedder, img,
+                        limit=limit, offset=max(0, offset),
+                        file_type=file_type, dir_filter=dir,
+                        sort=sort, with_facets=True)
+    results, facets = r
+    return {"query": "(以图搜图)", "ms": round((_time.time() - t0) * 1000, 1),
+            "results": results, "facets": facets, "mode": "image"}
 
 
 # --------------------------------------------------------------------- #

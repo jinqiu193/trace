@@ -8,6 +8,7 @@ export function Filters(props: {
   threshold: number;
   setThreshold: (n: number) => void;
   resultCount: number;
+  facets?: Record<string, number>;
 }) {
   return (
     <div className="filters">
@@ -19,8 +20,12 @@ export function Filters(props: {
               key={t}
               className={"type-btn" + (props.fileType === t ? " active" : "")}
               onClick={() => props.setFileType(props.fileType === t ? "" : t)}
+              title={props.facets && props.facets[t] > 0 ? `候选池中有 ${props.facets[t]} 个` : undefined}
             >
               {t}
+              {props.facets && props.facets[t] > 0 && (
+                <span className="type-count">{props.facets[t]}</span>
+              )}
             </button>
           ))}
         </div>

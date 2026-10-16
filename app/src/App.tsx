@@ -13,6 +13,7 @@ export default function App() {
   const [dir, setDir] = useState("");
   const [threshold, setThreshold] = useState(0);
   const [resultCount, setResultCount] = useState(0);
+  const [facets, setFacets] = useState<Record<string, number>>({});
   const [videoPreview, setVideoPreview] = useState<{ path: string; location: string; hits?: VideoHit[] } | null>(null);
   const [imagePreview, setImagePreview] = useState<{
     path: string;
@@ -33,6 +34,7 @@ export default function App() {
           threshold={threshold}
           setThreshold={setThreshold}
           resultCount={resultCount}
+          facets={facets}
         />
       </aside>
       <main className="main">
@@ -43,6 +45,7 @@ export default function App() {
           onPlayVideo={(path, location, hits) => setVideoPreview({ path, location, hits })}
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
           onResultCount={setResultCount}
+          onFacets={setFacets}
         />
       </main>
       <StatusBar tick={statusTick} />

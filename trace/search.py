@@ -37,6 +37,37 @@ STD_FLOOR = 0.02        # z-score 标准差下限，防退化
 STRONG_RATIO = 0.5      # strong 折叠阈值
 KW_LIMIT = 400          # 每 pattern FTS 命中上限
 FUZZY_COVERAGE = 0.75   # 模糊命中（截断变体）的 coverage 折扣
+VISION_MODALITIES = ("image", "video_frame")  # 以图搜图比对的切片模态
+
+
+def _sort_scored(scored: list, sort: str) -> None:
+    """文件级排序：relevance（融合分）/ mtime_desc / mtime_asc / size_desc / name。
+
+    排序在全量候选上完成后才分页，切换排序维度不需要重新查询。
+    """
+    if sort == "mtime_desc":
+        scored.sort(key=lambda x: x[1]["row"]["mtime"] or 0, reverse=True)
+    elif sort == "mtime_asc":
+        scored.sort(key=lambda x: x[1]["row"]["mtime"] or 0)
+    elif sort == "size_desc":
+        scored.sort(key=lambda x: x[1]["row"]["size"] or 0, reverse=True)
+    elif sort == "name":
+        scored.sort(key=lambda x: (x[1]["row"]["name"] or "").lower())
+    else:
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+
+def _facets(file_rows: dict, candidates: set, dir_filter: str | None) -> dict[str, int]:
+    """类型分布统计（file_type 过滤之前、dir 过滤之后）——类型筛选按钮的计数。"""
+    out: dict[str, int] = {}
+    for fid in candidates:
+        fr = file_rows.get(fid)
+        if fr is None:
+            continue
+        if dir_filter and dir_filter.lower() not in fr["path"].lower():
+            continue
+        out[fr["file_type"]] = out.get(fr["file_type"], 0) + 1
+    return out
 
 
 def _meaning(cos: np.ndarray, modalities: list[str], std_floor: float = STD_FLOOR) -> np.ndarray:
@@ -168,12 +199,15 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
 
 def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
            file_type: str | None = None, dir_filter: str | None = None,
-           z_gate: float | None = None) -> list[dict]:
+           z_gate: float | None = None, sort: str = "relevance",
+           with_facets: bool = False) -> list[dict] | tuple[list[dict], dict]:
     """混合语义+关键词检索，返回按融合分排序的文件级结果。
 
     Args:
         z_gate: 语义命中门限（默认 2.0）。前端滑杆 0-10 传过来。
         offset: 分页偏移（与 limit 配合；排序在全量候选上完成后切片）。
+        sort: 文件级排序维度（relevance/mtime_desc/mtime_asc/size_desc/name）。
+        with_facets: True 时返回 (results, facets)——类型分布计数。
     """
     z_gate = z_gate if z_gate is not None else Z_GATE
     qv = np.asarray(embedder.embed_query(query), dtype=np.float32)
@@ -249,6 +283,8 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
                                "kw": kw_file_slice.get(fid)}))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    _sort_scored(scored, sort)
+    facets_out = _facets(file_rows, candidates, dir_filter) if with_facets else {}
     # 兜底场景下，score 普遍很低，UI 端应折叠展示
     if fallback:
         for _sc, item in scored:
@@ -396,12 +432,176 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             "nearby_frames": nearby_frames,
             "hits": hits_out,
             "confidence": confidence,
+            "size": fr["size"] if "size" in fr.keys() else 0,
         })
+    if with_facets:
+        return out, facets_out
     return out
 
 
 def search_with_timing(store, embedder, query: str, **kw) -> dict:
-    """带耗时信息的检索（CLI 用）。"""
+    """带耗时信息的检索（CLI / web 用）。facets 始终返回（无成本时为空）。"""
     t0 = time.time()
-    results = search(store, embedder, query, **kw)
-    return {"query": query, "ms": round((time.time() - t0) * 1000, 1), "results": results}
+    with_facets = bool(kw.pop("with_facets", False))
+    r = search(store, embedder, query, with_facets=with_facets, **kw)
+    if with_facets:
+        results, facets = r
+    else:
+        results, facets = r, {}
+    return {"query": query, "ms": round((time.time() - t0) * 1000, 1),
+            "results": results, "facets": facets}
+
+
+def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
+                    file_type: str | None = None, dir_filter: str | None = None,
+                    sort: str = "relevance", with_facets: bool = False):
+    """以图搜图：上传图片 → 视觉嵌入 → 与库内视觉切片（image/video_frame）cos 检索。
+
+    查询向量与图片/视频帧切片同源（embed_image_pil，BOI token 口径），
+    直接 cosine 无跨模态 gap；z-score 沿用 _meaning 的按 modality 分组归一。
+    返回结构与 search() 同构（前端共用渲染）；snippet/coverage 等文本通道
+    字段置空。
+    """
+    qv = np.asarray(embedder.embed_image_pil(img), dtype=np.float32)
+    qv /= max(float(np.linalg.norm(qv)), 1e-9)
+
+    sids, fids, mods, matrix = store.all_vectors_matrix()
+    vis_idx = [i for i, m in enumerate(mods) if m in VISION_MODALITIES]
+    if not vis_idx:
+        return ([], {}) if with_facets else []
+
+    cos = matrix[vis_idx] @ qv
+    vmods = [mods[i] for i in vis_idx]
+    z = _meaning(cos, vmods)
+
+    best: dict[int, tuple[float, float, int]] = {}      # fid -> (z, cos, sid)
+    hits_by_file: dict[int, list[tuple[float, int]]] = {}
+    for j, i in enumerate(vis_idx):
+        fid = int(fids[i])
+        cur = best.get(fid)
+        if cur is None or z[j] > cur[0]:
+            best[fid] = (float(z[j]), float(cos[j]), int(sids[i]))
+        if z[j] >= Z_GATE:
+            hits_by_file.setdefault(fid, []).append((float(z[j]), int(sids[i])))
+
+    # 以图搜图的产品语义是"最相似的 N 个"（浏览型），不是"强匹配才算命中"
+    # （文字查询的 z-gate 是"没找到"语义）。这里按相似度圈定候选池
+    # （Top-N，N 随 limit 放大），排序维度（时间/大小）在池内切换。
+    pool_n = max(limit * 4, 60)
+    ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:pool_n]
+    candidates = {fid for fid, _t in ranked}
+
+    if not candidates:
+        return ([], {}) if with_facets else []
+    file_rows = store.files_by_ids(candidates)
+    facets_out = _facets(file_rows, candidates, dir_filter) if with_facets else {}
+
+    scored: list[tuple[float, dict]] = []
+    for fid in candidates:
+        fr = file_rows.get(fid)
+        if fr is None:
+            continue
+        if file_type and fr["file_type"] != file_type:
+            continue
+        if dir_filter and dir_filter.lower() not in fr["path"].lower():
+            continue
+        z_v, cos_v, sem_sid = best.get(fid, (0.0, 0.0, None))
+        scored.append((max(z_v, 0.0), {"file_id": fid, "row": fr, "z": z_v,
+                                        "cos": cos_v, "sem_sid": sem_sid}))
+    _sort_scored(scored, sort)
+
+    page = scored[offset:offset + limit]
+    top_z = scored[0][0] if scored else 0.0
+
+    # 视频帧位置批量取（nearby_frames 用）
+    video_fids = [item["file_id"] for _s, item in page
+                  if item["row"]["file_type"] == "video" and item["sem_sid"] is not None]
+    frame_locs: dict[int, list[str]] = {}
+    for vfid in video_fids:
+        frame_locs[vfid] = store.frame_locations(vfid)
+
+    need_sids: set[int] = set()
+    for _s, item in page:
+        if item["sem_sid"] is not None:
+            need_sids.add(item["sem_sid"])
+    for fid, lst in hits_by_file.items():
+        if fid in {item["file_id"] for _s, item in page}:
+            need_sids.update(sid for _z, sid in lst)
+    slice_rows = store.slices_by_ids(list(need_sids)) if need_sids else {}
+
+    out: list[dict] = []
+    for score, item in page:
+        fr = item["row"]
+        z_v = item["z"]
+
+        location = ""
+        sem_r = slice_rows.get(item["sem_sid"]) if item["sem_sid"] is not None else None
+        if sem_r is not None and sem_r["location"]:
+            location = sem_r["location"]
+
+        # 视频命中片段列表（时间轴标记用；单图命中不需要）
+        hits_out: list[dict] = []
+        if fr["file_type"] == "video":
+            for hz, hsid in sorted(hits_by_file.get(fr["file_id"], []),
+                                   key=lambda x: x[0], reverse=True)[:8]:
+                r = slice_rows.get(hsid)
+                if not r or not r["location"]:
+                    continue
+                t_v = _parse_ts(r["location"])
+                if t_v is None:
+                    continue
+                hits_out.append({"t": t_v, "loc": r["location"], "snippet": "",
+                                 "source": "image", "score": round(hz, 3)})
+            merged: list[dict] = []
+            for h in sorted(hits_out, key=lambda x: x["t"]):
+                if merged and h["t"] - merged[-1]["t"] <= 3.0:
+                    if h["score"] > merged[-1]["score"]:
+                        merged[-1] = h
+                else:
+                    merged.append(h)
+            hits_out = merged[:8]
+
+        nearby_frames: list[dict] = []
+        if fr["file_type"] == "video" and location:
+            center = _parse_ts(location)
+            if center is not None:
+                parsed = sorted(
+                    (t, loc) for t, loc in
+                    [( _parse_ts(l), l) for l in frame_locs.get(fr["file_id"], [])]
+                    if t is not None)
+                nearby = [(t, loc) for t, loc in parsed if abs(t - center) <= 12.0]
+                if nearby:
+                    if len(nearby) <= 5:
+                        picks = nearby
+                    else:
+                        idx = min(range(len(nearby)), key=lambda i: abs(nearby[i][0] - center))
+                        lo = max(0, idx - 2)
+                        hi = min(len(nearby), lo + 5)
+                        lo = max(0, hi - 5)
+                        picks = nearby[lo:hi]
+                    nearby_frames = [{"t": t, "loc": loc} for t, loc in picks]
+
+        confidence = "high" if z_v >= 2.0 else ("medium" if z_v >= 1.0 else "low")
+        out.append({
+            "score": round(score, 4),
+            "path": fr["path"],
+            "name": fr["name"],
+            "file_type": fr["file_type"],
+            "location": location,
+            "cos_sim": round(item["cos"], 4),
+            "z": round(z_v, 3),
+            "coverage": 0.0,
+            "keyword_rank": None,
+            "snippet": (sem_r["text_snippet"] or "")[:160] if sem_r is not None else "",
+            "mtime": fr["mtime"],
+            "strong": score >= top_z * STRONG_RATIO if top_z > 0 else True,
+            "weak_fallback": False,
+            "fuzzy_match": False,
+            "nearby_frames": nearby_frames,
+            "hits": hits_out,
+            "confidence": confidence,
+            "size": fr["size"] if "size" in fr.keys() else 0,
+        })
+    if with_facets:
+        return out, facets_out
+    return out
