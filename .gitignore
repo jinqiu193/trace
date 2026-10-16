@@ -16,6 +16,7 @@ WeMM-Embedding-2B-GGUF/
 *.gguf
 test_frame.png
 reindex.log
+tauri_dev.log
 
 # 测试产物
 tests/testbed/
