@@ -1,0 +1,39 @@
+[project]
+name = "trace"
+version = "0.2.0"
+description = "本地文件夹多模态语义检索：EmbeddingGemma 2 (ONNX) + SQLite (FTS5 + sqlite-vec)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # 推理
+    "onnxruntime-gpu==1.23.2",   # 1.23.2：CUDA EP 与驱动 576.28 匹配（见 embedder.py 注释）
+    "tokenizers",
+    "numpy",
+    "sqlite-vec",
+    # 文档解析
+    "pypdf",
+    "pillow",
+    "jieba",
+    "rapidocr-onnxruntime",
+    # 音视频
+    "opencv-python",
+    "av",
+    "scipy",
+    # 边车
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    # 模型下载（音频编码器懒加载）
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "reportlab",     # tests/make_testbed.py 生成 PDF
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,41 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 数据与模型（不入库）
+*.db
+*.db-wal
+*.db-shm
+models/
+models-gguf/
+WeMM-Embedding-2B-GGUF/
+*.onnx
+*.onnx_data
+*.gguf
+test_frame.png
+reindex.log
+
+# 测试产物
+tests/testbed/
+tests/screenshots/
+
+# 前端 / Tauri
+app/node_modules/
+app/dist/
+app/package.json.tmp
+app/src-tauri/target/
+
+# 参考项目 / 离线依赖缓存 / 实验脚本（tools 为本地构建缓存与归档）
+DigUp-main/
+tools/
+
+# IDE / agent 内部目录
+.codeartsdoer/
+.zcode/
+.zcode Workspace/
+
+# 系统
+Thumbs.db
+.DS_Store
