@@ -24,6 +24,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
+    "python-multipart",   # /api/search/image 的 multipart 表单解析
     # 模型下载（音频编码器懒加载）
     "huggingface_hub",
 ]
