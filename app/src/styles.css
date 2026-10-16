@@ -1111,3 +1111,97 @@ html, body, #root {
 .settings-body .root-manager .panel-header {
   margin-bottom: 10px;
 }
+/* -------- 2026-10-17 More like this / 重复检测 -------- */
+.mlt-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-3);
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.1s, color 0.1s;
+}
+.mlt-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.grid-meta .mlt-btn { padding: 1px 8px; }
+
+.similar-tag { display: inline-flex; align-items: center; gap: 6px; max-width: 420px; }
+.similar-clear {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.similar-clear:hover { color: var(--err); }
+
+.dup-panel { margin-top: 18px; }
+.dup-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.dup-controls input[type="range"] { width: 110px; accent-color: var(--accent); }
+.dup-th-label {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.dup-summary { font-size: 12px; color: var(--fg-2); margin-bottom: 10px; }
+.dup-summary b { color: var(--warn); }
+.dup-cluster {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.dup-cluster-head {
+  font-size: 11px;
+  color: var(--fg-3);
+  margin-bottom: 6px;
+  font-family: ui-monospace, monospace;
+}
+.dup-members {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dup-member {
+  width: 110px;
+  cursor: pointer;
+  text-align: center;
+}
+.dup-member img {
+  width: 110px;
+  height: 82px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.dup-member:hover img { border-color: var(--accent); }
+.dup-member-name {
+  font-size: 10px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-2);
+}
+.dup-member-meta {
+  font-size: 10px;
+  color: var(--fg-3);
+  font-family: ui-monospace, monospace;
+}

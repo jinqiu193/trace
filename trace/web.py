@@ -67,6 +67,15 @@ class SearchBody(BaseModel):
     sort: str = "relevance"               # relevance/mtime_desc/mtime_asc/size_desc/name
 
 
+class SimilarBody(BaseModel):
+    sid: int                              # 起始切片 id（More like this）
+    limit: int = 20
+    offset: int = 0
+    file_type: Optional[str] = None
+    dir: Optional[str] = None
+    sort: str = "relevance"
+
+
 class IndexBody(BaseModel):
     path: str = Field(..., min_length=1)
     full: bool = False
@@ -188,8 +197,12 @@ async def search_image(
     file_type: Optional[str] = Form(None),
     dir: Optional[str] = Form(None),
     sort: str = Form("relevance"),
+    text: Optional[str] = Form(None),
 ) -> dict:
-    """以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索。"""
+    """以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索。
+
+    text 非空时为图+文联合查询（"像这张图但要…"，BOI 尾接文本）。
+    """
     import io
     import time as _time
 
@@ -218,10 +231,47 @@ async def search_image(
     r = search_by_image(s.store, embedder, img,
                         limit=limit, offset=max(0, offset),
                         file_type=file_type, dir_filter=dir,
-                        sort=sort, with_facets=True)
+                        sort=sort, with_facets=True,
+                        text=text or "")
     results, facets = r
-    return {"query": "(以图搜图)", "ms": round((_time.time() - t0) * 1000, 1),
+    label = f"(以图搜图{f' · {text.strip()}' if text and text.strip() else ''})"
+    return {"query": label, "ms": round((_time.time() - t0) * 1000, 1),
             "results": results, "facets": facets, "mode": "image"}
+
+
+@app.post("/api/search/similar")
+def search_similar(body: SimilarBody) -> dict:
+    """More like this：以某切片向量为查询，找最相似的文件（全模态）。"""
+    import time as _time
+
+    from .search import search_by_sid
+
+    s = _state()
+    t0 = _time.time()
+    r = search_by_sid(s.store, s.get_embedder(), body.sid,
+                      limit=body.limit, offset=max(0, body.offset),
+                      file_type=body.file_type, dir_filter=body.dir,
+                      sort=body.sort, with_facets=True)
+    results, facets = r
+    return {"query": f"(相似 #{body.sid})", "ms": round((_time.time() - t0) * 1000, 1),
+            "results": results, "facets": facets, "mode": "similar"}
+
+
+@app.get("/api/duplicates")
+def duplicates(threshold: float = 0.95) -> dict:
+    """近似重复图片检测报告：image 切片 cos ≥ threshold 聚簇。"""
+    import time as _time
+
+    from .search import find_duplicates
+
+    s = _state()
+    threshold = min(max(threshold, 0.5), 0.9999)
+    t0 = _time.time()
+    clusters = find_duplicates(s.store, threshold=threshold)
+    n_files = sum(len(c["members"]) for c in clusters)
+    return {"threshold": threshold, "ms": round((_time.time() - t0) * 1000, 1),
+            "clusters": clusters, "cluster_count": len(clusters),
+            "file_count": n_files}
 
 
 # --------------------------------------------------------------------- #

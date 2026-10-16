@@ -97,6 +97,9 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   const [imgUrl, setImgUrl] = useState<string | null>(null);
   const imgUrlRef = useRef<string | null>(null);
 
+  // More like this：以某切片向量搜相似（全模态）
+  const [similarFrom, setSimilarFrom] = useState<{ sid: number; name: string } | null>(null);
+
   // 排序 / 视图 / facets
   const [sort, setSort] = useState<SortKey>("relevance");
   const [view, setView] = useState<"list" | "grid">("list");
@@ -142,6 +145,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     imgUrlRef.current = u;
     setImgFile(f);
     setImgUrl(u);
+    setSimilarFrom(null);
     setQuery("");
     setShowHistory(false);
     setHistSel(-1);
@@ -151,6 +155,20 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     if (imgUrlRef.current) { URL.revokeObjectURL(imgUrlRef.current); imgUrlRef.current = null; }
     setImgFile(null);
     setImgUrl(null);
+    inputRef.current?.focus();
+  }, []);
+
+  // ---- More like this ----
+  const startSimilar = useCallback((sid: number, name: string) => {
+    if (imgUrlRef.current) { URL.revokeObjectURL(imgUrlRef.current); imgUrlRef.current = null; }
+    setImgFile(null);
+    setImgUrl(null);
+    setQuery("");
+    setSimilarFrom({ sid, name });
+  }, []);
+
+  const clearSimilar = useCallback(() => {
+    setSimilarFrom(null);
     inputRef.current?.focus();
   }, []);
 
@@ -196,15 +214,18 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     return () => window.removeEventListener("paste", onPaste);
   }, [pickImage]);
 
-  // 统一检索入口：图片模式立即执行（嵌入慢，无防抖）；文字模式防抖 150ms。
-  // limit 变化（加载更多）与 sort 切换复用同一路径（后端排序在候选池内生效）。
+  // 统一检索入口，三模式：
+  // - More like this：切片向量查询（最快，无嵌入）
+  // - 图片（+可选补充文字 = 图+文联合查询）：视觉嵌入慢，300ms 防抖
+  //   （打字改补充词时不每键重嵌）；图片模式下文字是联合条件而非切回文字搜索
+  // - 文字：150ms 防抖。limit/sort 变化复用同一路径。
   useEffect(() => {
-    if (imgFile) {
+    if (similarFrom) {
       let cancelled = false;
       (async () => {
         setLoading(true); setError(null);
         try {
-          const r = await api.searchImage(imgFile, {
+          const r = await api.searchSimilar(similarFrom.sid, {
             limit,
             sort,
             file_type: fileType || undefined,
@@ -223,6 +244,31 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
         }
       })();
       return () => { cancelled = true; };
+    }
+    if (imgFile) {
+      const text = query.trim();
+      const t = setTimeout(async () => {
+        setLoading(true); setError(null);
+        try {
+          const r = await api.searchImage(imgFile, {
+            limit,
+            sort,
+            text: text || undefined,
+            file_type: fileType || undefined,
+            dir: dir || undefined,
+          });
+          setResults(r.results);
+          setMs(r.ms);
+          setFacets(r.facets ?? {});
+          setFuzzy(false);
+          setSelected(0);
+        } catch (e: any) {
+          setError(String(e?.message ?? e));
+        } finally {
+          setLoading(false);
+        }
+      }, 300);
+      return () => clearTimeout(t);
     }
     if (!query.trim()) { setResults([]); setMs(null); setFuzzy(false); setFacets({}); return; }
     const t = setTimeout(async () => {
@@ -247,7 +293,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
       }
     }, 150);
     return () => clearTimeout(t);
-  }, [imgFile, query, fileType, dir, threshold, limit, sort]);
+  }, [similarFrom, imgFile, query, fileType, dir, threshold, limit, sort]);
 
   // 历史记录：查询稳定 2s 后写入（避免打字中间态全部入史）
   useEffect(() => {
@@ -329,7 +375,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     URL.revokeObjectURL(a.href);
   };
 
-  const active = !!imgFile || !!query.trim();
+  const active = !!imgFile || !!similarFrom || !!query.trim();
 
   const renderThumb = (r: SearchResult, maxW: number) => {
     if (r.file_type === "image") {
@@ -357,14 +403,16 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
           ref={inputRef}
           value={query}
           onChange={(e) => {
-            if (imgFile) clearImage();
+            if (similarFrom) clearSimilar();
             setQuery(e.target.value); setShowHistory(true); setHistSel(-1);
           }}
           onFocus={() => setShowHistory(true)}
           onBlur={() => setTimeout(() => setShowHistory(false), 150)}
           placeholder={imgFile
-            ? "以图搜图中 · 输入文字即切回文字搜索"
-            : '搜点什么？比如 "a penguin"、"讲睡眠的那段"、"invoice 1024"'}
+            ? "补充文字让结果更精准（如：夜景版本）· 清空 = 纯以图搜图"
+            : similarFrom
+              ? `正在以「${similarFrom.name}」搜相似 · 输入文字即退出`
+              : '搜点什么？比如 "a penguin"、"讲睡眠的那段"、"invoice 1024"'}
           spellCheck={false}
           autoComplete="off"
         />
@@ -430,7 +478,17 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
 
       {active && (
         <div className="search-toolbar">
-          {imgFile && <span className="img-mode-tag">🖼 以图搜图 · 按相似度浏览</span>}
+          {imgFile && (
+            <span className="img-mode-tag">
+              🖼 {query.trim() ? "图+文联合搜索" : "以图搜图 · 按相似度浏览"}
+            </span>
+          )}
+          {similarFrom && (
+            <span className="img-mode-tag similar-tag" title={`切片 #${similarFrom.sid}`}>
+              ⤳ 相似：{similarFrom.name}
+              <button className="similar-clear" onClick={clearSimilar} title="退出相似搜索">✕</button>
+            </span>
+          )}
           <span className="toolbar-spacer" />
           <label className="sort-label">排序</label>
           <select className="sort-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
@@ -461,7 +519,9 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
           <div className="empty">
             {imgFile
               ? "没有找到相似内容。试试换一张图，或清除类型/目录过滤。"
-              : "没有命中。试试换个说法，或在右上角「⚙ 设置」里添加更多文件夹。"}
+              : similarFrom
+                ? "没有找到相似内容。"
+                : "没有命中。试试换个说法，或在右上角「⚙ 设置」里添加更多文件夹。"}
           </div>
         )}
 
@@ -484,6 +544,10 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
                   <span className="grid-score">{r.score.toFixed(3)}</span>
                   {fmtSize(r.size) && <span>{fmtSize(r.size)}</span>}
                   {fmtDate(r.mtime) && <span>{fmtDate(r.mtime)}</span>}
+                  {r.sid != null && (
+                    <button className="mlt-btn" title="搜索与此相似的内容"
+                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}>⤳</button>
+                  )}
                 </div>
               </div>
             ))}
@@ -518,6 +582,10 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
                   <span className="result-score">score {r.score.toFixed(3)}</span>
                   {r.confidence === "low" && <span className="confidence-low">⚠ 低置信</span>}
                   {r.confidence === "medium" && <span className="confidence-med">中置信</span>}
+                  {r.sid != null && (
+                    <button className="mlt-btn" title="搜索与此相似的内容"
+                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}>⤳ 相似</button>
+                  )}
                 </div>
                 <div className="result-row2">
                   <span className="result-z">z={r.z.toFixed(2)}</span>

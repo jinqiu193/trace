@@ -60,6 +60,7 @@ export interface SearchResult {
   snippet: string;
   mtime: number;
   size?: number;
+  sid?: number;
   strong: boolean;
   weak_fallback?: boolean;
   fuzzy_match?: boolean;
@@ -102,6 +103,23 @@ export interface IndexTaskStatus {
   finished_at: string | null;
 }
 
+export interface DupMember {
+  path: string;
+  name: string;
+  size: number;
+  mtime: number;
+  sid: number;
+  cos: number;
+}
+
+export interface DuplicatesResponse {
+  threshold: number;
+  ms: number;
+  clusters: { members: DupMember[]; max_cos: number }[];
+  cluster_count: number;
+  file_count: number;
+}
+
 let _port: number | null = null;
 let _base: string | null = null;
 
@@ -140,14 +158,15 @@ export const api = {
       file_type: opts?.file_type, dir: opts?.dir, threshold: opts?.threshold,
       sort: opts?.sort ?? "relevance",
     }),
-  /** 以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索 */
-  searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey }) => {
+  /** 以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索；text 非空为图+文联合查询 */
+  searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey; text?: string }) => {
     const b = await base();
     const fd = new FormData();
     fd.append("file", file, file.name);
     fd.append("limit", String(opts?.limit ?? 20));
     fd.append("offset", String(opts?.offset ?? 0));
     fd.append("sort", opts?.sort ?? "relevance");
+    if (opts?.text) fd.append("text", opts.text);
     if (opts?.file_type) fd.append("file_type", opts.file_type);
     if (opts?.dir) fd.append("dir", opts.dir);
     const r = await fetch(`${b}/api/search/image`, { method: "POST", body: fd });
@@ -157,6 +176,15 @@ export const api = {
     }
     return r.json() as Promise<SearchResponse>;
   },
+  /** More like this：以某切片向量搜最相似文件（全模态） */
+  searchSimilar: (sid: number, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey }) =>
+    json<SearchResponse>("POST", "/api/search/similar", {
+      sid, limit: opts?.limit ?? 20, offset: opts?.offset ?? 0,
+      file_type: opts?.file_type, dir: opts?.dir, sort: opts?.sort ?? "relevance",
+    }),
+  /** 近似重复图片检测报告 */
+  duplicates: (threshold: number = 0.95) =>
+    json<DuplicatesResponse>("GET", `/api/duplicates?threshold=${threshold}`),
   /** 提交后台索引任务（立即返回，进度走 indexStatus 轮询） */
   index: (path: string, full = false) =>
     json<{ ok: boolean; path: string; task: TaskBrief }>("POST", "/api/index", { path, full }),

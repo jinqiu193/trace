@@ -495,6 +495,20 @@ class Store:
                     out[r["slice_id"]] = (r["file_id"], r["text_snippet"] or "")
         return out
 
+    def vector_by_sid(self, slice_id: int):
+        """取单个切片的向量（L2 归一化）；无向量/不存在返回 None。More-like-this 用。"""
+        with self._lock:
+            r = self.db.execute(
+                "SELECT vector FROM slices WHERE slice_id = ?", (slice_id,)).fetchone()
+        if r is None or r["vector"] is None:
+            return None
+        import numpy as np
+        v = np.frombuffer(r["vector"], dtype=np.float32).copy()
+        norm = float(np.linalg.norm(v))
+        if norm <= 0:
+            return None
+        return v / norm
+
     def slices_by_ids(self, slice_ids: list[int]) -> dict[int, sqlite3.Row]:
         out: dict[int, sqlite3.Row] = {}
         if not slice_ids:

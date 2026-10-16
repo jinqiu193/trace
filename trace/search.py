@@ -433,6 +433,7 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             "hits": hits_out,
             "confidence": confidence,
             "size": fr["size"] if "size" in fr.keys() else 0,
+            "sid": sid,
         })
     if with_facets:
         return out, facets_out
@@ -454,29 +455,69 @@ def search_with_timing(store, embedder, query: str, **kw) -> dict:
 
 def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
                     file_type: str | None = None, dir_filter: str | None = None,
-                    sort: str = "relevance", with_facets: bool = False):
+                    sort: str = "relevance", with_facets: bool = False,
+                    text: str = ""):
     """以图搜图：上传图片 → 视觉嵌入 → 与库内视觉切片（image/video_frame）cos 检索。
 
     查询向量与图片/视频帧切片同源（embed_image_pil，BOI token 口径），
     直接 cosine 无跨模态 gap；z-score 沿用 _meaning 的按 modality 分组归一。
+    text 非空时走图+文联合嵌入（embed_image_text_pil，"像这张图但要…"）。
     返回结构与 search() 同构（前端共用渲染）；snippet/coverage 等文本通道
     字段置空。
     """
-    qv = np.asarray(embedder.embed_image_pil(img), dtype=np.float32)
+    if text and text.strip():
+        qv = np.asarray(embedder.embed_image_text_pil(img, text), dtype=np.float32)
+    else:
+        qv = np.asarray(embedder.embed_image_pil(img), dtype=np.float32)
     qv /= max(float(np.linalg.norm(qv)), 1e-9)
+    return _pool_search(store, qv, limit=limit, offset=offset, file_type=file_type,
+                        dir_filter=dir_filter, sort=sort, with_facets=with_facets,
+                        vis_only=True)
 
+
+def search_by_sid(store, embedder, sid: int, limit: int = 20, offset: int = 0,
+                  file_type: str | None = None, dir_filter: str | None = None,
+                  sort: str = "relevance", with_facets: bool = False):
+    """More like this：以某个切片的向量做查询，找最相似的文件。
+
+    全模态参与（文本/图片/视频帧），z-score 在参与模态内归一；
+    Top-N 池浏览语义与以图搜图一致。
+    """
+    qv = store.vector_by_sid(sid)
+    if qv is None:
+        return ([], {}) if with_facets else []
+    return _pool_search(store, qv, limit=limit, offset=offset, file_type=file_type,
+                        dir_filter=dir_filter, sort=sort, with_facets=with_facets,
+                        vis_only=False)
+
+
+def _pool_search(store, qv, limit: int = 20, offset: int = 0,
+                 file_type: str | None = None, dir_filter: str | None = None,
+                 sort: str = "relevance", with_facets: bool = False,
+                 vis_only: bool = True):
+    """向量查询的浏览型检索（以图搜图 / More like this 共用内核）。
+
+    语义是"最相似的 N 个"（浏览型），不是"强匹配才算命中"（文字查询的
+    z-gate 是"没找到"语义）。这里按相似度圈定候选池（Top-N，N 随 limit
+    放大），排序维度（时间/大小）在池内切换。
+    vis_only=True 只比对视觉切片（image/video_frame，图搜图口径）；
+    False 时全模态参与（More like this 口径）。
+    """
     sids, fids, mods, matrix = store.all_vectors_matrix()
-    vis_idx = [i for i, m in enumerate(mods) if m in VISION_MODALITIES]
-    if not vis_idx:
+    if vis_only:
+        idx = [i for i, m in enumerate(mods) if m in VISION_MODALITIES]
+    else:
+        idx = list(range(len(mods)))
+    if not idx:
         return ([], {}) if with_facets else []
 
-    cos = matrix[vis_idx] @ qv
-    vmods = [mods[i] for i in vis_idx]
+    cos = matrix[idx] @ qv
+    vmods = [mods[i] for i in idx]
     z = _meaning(cos, vmods)
 
     best: dict[int, tuple[float, float, int]] = {}      # fid -> (z, cos, sid)
     hits_by_file: dict[int, list[tuple[float, int]]] = {}
-    for j, i in enumerate(vis_idx):
+    for j, i in enumerate(idx):
         fid = int(fids[i])
         cur = best.get(fid)
         if cur is None or z[j] > cur[0]:
@@ -484,9 +525,7 @@ def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
         if z[j] >= Z_GATE:
             hits_by_file.setdefault(fid, []).append((float(z[j]), int(sids[i])))
 
-    # 以图搜图的产品语义是"最相似的 N 个"（浏览型），不是"强匹配才算命中"
-    # （文字查询的 z-gate 是"没找到"语义）。这里按相似度圈定候选池
-    # （Top-N，N 随 limit 放大），排序维度（时间/大小）在池内切换。
+
     pool_n = max(limit * 4, 60)
     ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)[:pool_n]
     candidates = {fid for fid, _t in ranked}
@@ -601,7 +640,75 @@ def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
             "hits": hits_out,
             "confidence": confidence,
             "size": fr["size"] if "size" in fr.keys() else 0,
+            "sid": item["sem_sid"],
         })
     if with_facets:
         return out, facets_out
     return out
+
+def find_duplicates(store, threshold: float = 0.95, max_clusters: int = 200) -> list[dict]:
+    """近似重复图片检测：image 模态切片 cos ≥ threshold 聚簇（Union-Find）。
+
+    只参与 modality=="image"（图片文件）：视频帧同源天然高相似会淹没报告，
+    文档切片重复属于"查重"另一场景。图片文件通常单切片，文件级即切片级。
+    返回簇列表（成员数降序），每簇 members[0] 为代表（体积最大者）。
+    """
+    sids, fids, mods, matrix = store.all_vectors_matrix()
+    idx = [i for i, m in enumerate(mods) if m == "image"]
+    if len(idx) < 2:
+        return []
+
+    sub = matrix[idx]
+    sub_sids = [int(sids[i]) for i in idx]
+    sub_fids = [int(fids[i]) for i in idx]
+    g = sub @ sub.T
+
+    # 并查集（按 file_id 归并；同一文件多切片天然同簇）
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # numpy 找边（上三角），union 只跑真实边——避免 O(n²) 的 Python 循环
+    pairs = np.argwhere(np.triu(g >= threshold, k=1))
+    for a, b in pairs:
+        union(sub_fids[int(a)], sub_fids[int(b)])
+
+    clusters: dict[int, list[int]] = {}
+    for a in range(len(idx)):
+        clusters.setdefault(find(sub_fids[a]), []).append(a)
+
+    out: list[dict] = []
+    for _root, members in clusters.items():
+        fids_set = {sub_fids[a] for a in members}
+        if len(fids_set) < 2:
+            continue
+        rows = store.files_by_ids(fids_set)
+        rep_fid = max(fids_set, key=lambda f: (rows[f]["size"] if f in rows else 0))
+        rep_idx = next(a for a in members if sub_fids[a] == rep_fid)
+        members_out = []
+        for f in fids_set:
+            fr = rows.get(f)
+            if fr is None:
+                continue
+            a = next(a for a in members if sub_fids[a] == f)
+            members_out.append({
+                "path": fr["path"], "name": fr["name"], "size": fr["size"],
+                "mtime": fr["mtime"], "sid": sub_sids[a],
+                "cos": 1.0 if a == rep_idx else round(float(g[rep_idx, a]), 4),
+            })
+        members_out.sort(key=lambda m: -m["size"])
+        others = [m["cos"] for m in members_out[1:]]
+        out.append({"members": members_out,
+                    "max_cos": round(max(others), 4) if others else 1.0})
+    out.sort(key=lambda c: (-len(c["members"]), -c["max_cos"]))
+    return out[:max_clusters]

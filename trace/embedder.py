@@ -287,19 +287,20 @@ class Embedder:
             feats = feats[0]
         return feats
 
-    def _run_with_image_features(self, feats: np.ndarray) -> np.ndarray:
+    def _run_with_image_features(self, feats: np.ndarray, suffix: str = "") -> np.ndarray:
         """image_features → 主模型 → 768 维向量。
 
         IMAGE_INDEX_PREFIX（config）为非空时，会在 BOI 前拼一段文本 token，
         把 image 嵌入"拉"到 text 一侧以缩小跨模态间隙。
         merge/cumsum 按 token id 定位，对前缀 token 不敏感。
+        suffix：EOI 之后追加的查询文本（图+文联合查询，"像这张图但要…"），
+        索引/纯图路径留空。
         """
         n = feats.shape[0]
         prefix = config.IMAGE_INDEX_PREFIX
-        if prefix:
-            seq = prefix + config.BOI_TOKEN + config.IMAGE_TOKEN * n + config.EOI_TOKEN
-        else:
-            seq = config.BOI_TOKEN + config.IMAGE_TOKEN * n + config.EOI_TOKEN
+        seq = prefix + config.BOI_TOKEN + config.IMAGE_TOKEN * n + config.EOI_TOKEN
+        if suffix:
+            seq = seq + suffix
         enc = self.tok.encode(seq, add_special_tokens=True)
         ids = np.asarray([enc.ids], dtype=np.int64)
         mask = np.asarray([enc.attention_mask], dtype=np.int64)
@@ -333,6 +334,17 @@ class Embedder:
         from . import vision
         pv, pos, _ = vision.preprocess_pil(img)
         return self._run_with_image_features(self._encode_vision_features(pv, pos))
+
+    def embed_image_text_pil(self, img, text: str) -> np.ndarray:
+        """图+文联合查询：图块在前、查询文字在 EOI 后（"像这张图，但要…"）。
+
+        与索引口径一致（纯图 BOI..EOI 无文本前缀），文字只追加在尾部，
+        不改变图片 token 的对齐方式，跨模态 gap 与纯图查询相同。
+        """
+        from . import vision
+        pv, pos, _ = vision.preprocess_pil(img)
+        return self._run_with_image_features(
+            self._encode_vision_features(pv, pos), suffix=(text or "").strip())
 
     # ------------------------------------------------------------------ #
     # 音频模态（Gemma4 音频编码器 → audio_features → 主模型）
