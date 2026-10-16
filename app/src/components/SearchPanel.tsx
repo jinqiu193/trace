@@ -461,7 +461,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
           <div className="empty">
             {imgFile
               ? "没有找到相似内容。试试换一张图，或清除类型/目录过滤。"
-              : "没有命中。试试换个说法，或点左侧「+ 添加」索引更多文件夹。"}
+              : "没有命中。试试换个说法，或在右上角「⚙ 设置」里添加更多文件夹。"}
           </div>
         )}
 

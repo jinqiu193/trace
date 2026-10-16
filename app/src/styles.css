@@ -28,43 +28,63 @@ html, body, #root {
 
 .app {
   display: grid;
-  grid-template-columns: 320px 1fr;
-  grid-template-rows: 1fr auto;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: auto 1fr auto;
   grid-template-areas:
+    "menu menu"
     "side main"
     "stat stat";
   height: 100vh;
 }
 
+.menubar {
+  grid-area: menu;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  -webkit-user-select: none;
+}
+.menubar-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+.menubar-sub { color: var(--fg-3); font-size: 11px; }
+.menubar-spacer { flex: 1; }
+.menubar-btn {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.1s, color 0.1s;
+}
+.menubar-btn:hover { border-color: var(--accent); color: var(--accent); }
+
 .sidebar {
   grid-area: side;
   background: var(--bg-2);
   border-right: 1px solid var(--border);
-  padding: 18px 16px;
+  padding: 14px 12px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .main {
   grid-area: main;
   overflow-y: auto;
-  padding: 24px 28px;
+  padding: 20px 28px;
 }
 
-.app-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  color: var(--accent);
-}
-.app-sub {
-  margin: -14px 0 0 0;
-  color: var(--fg-3);
-  font-size: 11px;
-}
+/* 旧的 sidebar 标题样式已由 menubar 取代 */
 
 .statusbar {
   grid-area: stat;
@@ -1033,4 +1053,61 @@ html, body, #root {
 .result-mtime {
   margin-left: auto;
   white-space: nowrap;
+}
+/* -------- 2026-10-17 菜单栏 + 设置弹窗（文件夹/索引管理迁入） -------- */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+}
+.settings-window {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(680px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  font-weight: 600;
+  font-size: 13px;
+}
+.settings-close {
+  background: transparent;
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.settings-close:hover { color: var(--fg); border-color: var(--accent); }
+.settings-body {
+  padding: 16px;
+  overflow-y: auto;
+}
+.settings-hint {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.7;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.settings-body .root-manager .panel-header {
+  margin-bottom: 10px;
 }
