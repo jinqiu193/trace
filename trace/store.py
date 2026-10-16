@@ -107,8 +107,28 @@ class Store:
         self._vector_dim = self._detect_vector_dim()
         self._vec_ok = True
         self._ensure_vec_index()
+        self._migrate_legacy_file_type()
         # 矩阵缓存：首次 all_vectors_matrix() 后常驻；写操作失效
         self._matrix_cache: tuple | None = None
+
+    def _migrate_legacy_file_type(self) -> None:
+        """旧版库的 files.file_type 存的是扩展名（如 '.mp4'），新版统一为
+        classify 的 kind（'video'/'image'/...）。启动时一次性修正，幂等。"""
+        rows = self.db.execute(
+            "SELECT DISTINCT file_type FROM files WHERE file_type LIKE '.%'"
+        ).fetchall()
+        if not rows:
+            return
+        from .readers import classify
+
+        for r in rows:
+            ext = r["file_type"]
+            kind = classify(Path("x" + ext))
+            if kind != "other":
+                self.db.execute(
+                    "UPDATE files SET file_type=? WHERE file_type=?", (kind, ext))
+                log.info("迁移 file_type: %s -> %s", ext, kind)
+        self.db.commit()
 
     # ------------------------------------------------------------------ #
     # 事务：batch 模式下抑制中间 commit

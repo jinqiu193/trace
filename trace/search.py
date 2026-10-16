@@ -126,6 +126,7 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
             fuzzy = bool(per_pattern and any(per_pattern)) or bool(short_hits)
 
     kw_file_slice: dict[int, tuple[float, int]] = {}
+    kw_all: dict[int, list[tuple[float, int]]] = {}
     coverage: dict[int, float] = {}
     total_words = len(ts) or 1  # coverage 用原始词数（不要被扩展词放大）
     if per_pattern or short_hits:
@@ -136,18 +137,18 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
         sid_text = store.slice_text_by_ids(list(all_sids))
         file_hits: dict[int, int] = {}
         for h in per_pattern:
-            for sid in h:
+            for sid, bm in h.items():
                 info = sid_text.get(sid)
                 if info is None:
                     continue
                 fid, text = info
                 if is_watermark_only(text):
                     continue
-                bm = h[sid]
                 file_hits[fid] = file_hits.get(fid, 0) + 1
                 cur = kw_file_slice.get(fid)
                 if cur is None or bm > cur[0]:
                     kw_file_slice[fid] = (bm, sid)
+                kw_all.setdefault(fid, []).append((bm, sid))
         for sid, n in short_hits.items():
             info = sid_text.get(sid)
             if info is None:
@@ -158,10 +159,11 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
             file_hits[fid] = file_hits.get(fid, 0) + n
             if fid not in kw_file_slice:
                 kw_file_slice[fid] = (0.0, sid)
+            kw_all.setdefault(fid, []).append((0.0, sid))
         discount = FUZZY_COVERAGE if fuzzy else 1.0
         for fid, n in file_hits.items():
             coverage[fid] = min(n / total_words, 1.0) * discount
-    return kw_file_slice, coverage, fuzzy
+    return kw_file_slice, kw_all, coverage, fuzzy
 
 
 def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
@@ -180,6 +182,8 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
     # ---- 1. 语义通道：全量 cosine + z-score（矩阵缓存）----
     sids, fids, mods, matrix = store.all_vectors_matrix()
     best_sem: dict[int, tuple[float, float, int]] = {}   # file_id -> (z, cosine, slice_id)
+    # 视频文件的语义命中片段（file_id -> [(z, slice_id)]，槽位制保留 top-8）
+    vid_sem: dict[int, list[tuple[float, int]]] = {}
     if len(sids):
         cos = matrix @ qv
         z = _meaning(cos, mods)
@@ -189,12 +193,20 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             cur = best_sem.get(fid)
             if cur is None or z[i] > cur[0]:
                 best_sem[fid] = (float(z[i]), float(cos[i]), int(sids[i]))
+            if mods[i] in ("video_frame", "video_sound") and z[i] >= z_gate:
+                lst = vid_sem.setdefault(fid, [])
+                if len(lst) < 8:
+                    lst.append((float(z[i]), int(sids[i])))
+                else:
+                    mi = min(range(len(lst)), key=lambda k: lst[k][0])
+                    if z[i] > lst[mi][0]:
+                        lst[mi] = (float(z[i]), int(sids[i]))
 
     # ---- 2. 关键词通道（含模糊降级）----
     ts = terms(query)
     expanded = expand_concepts(ts)
     ts_fts = ts + expanded
-    kw_file_slice, coverage, fuzzy = _keyword_channel(store, ts, ts_fts)
+    kw_file_slice, kw_all, coverage, fuzzy = _keyword_channel(store, ts, ts_fts)
 
     # ---- 3. 融合 ----
     lookup = is_lookup(ts)
@@ -246,12 +258,36 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
     page = scored[offset:offset + limit]
 
     # ---- 4. 组装结果（批量取 slice / 帧信息，消除 N+1）----
+    # 视频命中片段：语义 + 关键词两通道的 per-slice 命中（file_id -> [(score, sid, source)]）
+    vid_hits: dict[int, list[tuple[float, int, str]]] = {}
+    for _score, item in page:
+        fid = item["file_id"]
+        if item["row"]["file_type"] != "video":
+            continue
+        lst = vid_hits.setdefault(fid, [])
+        for z_v, sid in vid_sem.get(fid, []):
+            lst.append((z_v, sid, "sem"))
+        for bm, sid in kw_all.get(fid, []):
+            lst.append((bm, sid, "kw"))
+    for fid, lst in vid_hits.items():
+        lst.sort(key=lambda x: x[0], reverse=True)
+        seen: set[int] = set()
+        dedup: list[tuple[float, int, str]] = []
+        for sc, sid, src in lst:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            dedup.append((sc, sid, src))
+        vid_hits[fid] = dedup[:8]
+
     need_sids: set[int] = set()
     for _score, item in page:
         if item["sem_sid"] is not None:
             need_sids.add(item["sem_sid"])
         if item["kw"] is not None:
             need_sids.add(item["kw"][1])
+    for lst in vid_hits.values():
+        need_sids.update(sid for _sc, sid, _src in lst)
     slice_rows = store.slices_by_ids(list(need_sids)) if need_sids else {}
 
     # 视频帧位置批量取（仅 video 命中）
@@ -274,14 +310,43 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             r = slice_rows.get(sid)
             if r:
                 snippet = _highlight(r["text_snippet"] or "", ts)
-                if r["modality"] == "video_frame" and r["location"]:
+                if r["modality"] in ("video_frame", "video_sound") and r["location"]:
                     item["video_loc_ts"] = r["location"]
         if not snippet and kw is not None:
             r = slice_rows.get(kw[1])
             if r:
                 snippet = _highlight(r["text_snippet"] or "", ts)
-                if r["modality"] == "video_frame" and r["location"]:
+                if r["modality"] in ("video_frame", "video_sound") and r["location"]:
                     item["video_loc_ts"] = r["location"]
+        # ---- 视频命中片段列表（前端时间轴标记 + 片段跳转）----
+        hits_out: list[dict] = []
+        if fr["file_type"] == "video":
+            for sc, hsid, src in vid_hits.get(fr["file_id"], []):
+                r = slice_rows.get(hsid)
+                if not r or not r["location"]:
+                    continue
+                t_v = _parse_ts(r["location"])
+                if t_v is None:
+                    continue
+                hits_out.append({
+                    "t": t_v,
+                    "loc": r["location"],
+                    "snippet": _highlight(r["text_snippet"] or "", ts),
+                    "source": src,
+                    "score": round(float(sc), 3),
+                })
+            # 时间相邻（≤3s）的命中点合并为同一处，保留高分；按时间排序
+            merged: list[dict] = []
+            for h in sorted(hits_out, key=lambda x: x["t"]):
+                if merged and h["t"] - merged[-1]["t"] <= 3.0:
+                    if h["score"] > merged[-1]["score"]:
+                        merged[-1] = h
+                else:
+                    merged.append(h)
+            hits_out = merged[:8]
+            if hits_out:
+                best = max(hits_out, key=lambda x: x["score"])
+                item["video_loc_ts"] = best["loc"]
         # ---- 视频附近 5 帧：单帧不准时让用户能视觉扫到正确画面 ----
         nearby_frames: list[dict] = []
         if fr["file_type"] == "video" and item.get("video_loc_ts"):
@@ -329,6 +394,7 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             "weak_fallback": item.get("weak_fallback", False),
             "fuzzy_match": fuzzy,
             "nearby_frames": nearby_frames,
+            "hits": hits_out,
             "confidence": confidence,
         })
     return out

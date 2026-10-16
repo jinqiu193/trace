@@ -5,6 +5,7 @@ import { StatusBar } from "./components/StatusBar";
 import { Filters } from "./components/Filters";
 import { VideoPreview } from "./components/VideoPreview";
 import { ImagePreview } from "./components/ImagePreview";
+import type { VideoHit } from "./api";
 
 export default function App() {
   const [statusTick, setStatusTick] = useState(0);
@@ -12,7 +13,7 @@ export default function App() {
   const [dir, setDir] = useState("");
   const [threshold, setThreshold] = useState(0);
   const [resultCount, setResultCount] = useState(0);
-  const [videoPreview, setVideoPreview] = useState<{ path: string; location: string } | null>(null);
+  const [videoPreview, setVideoPreview] = useState<{ path: string; location: string; hits?: VideoHit[] } | null>(null);
   const [imagePreview, setImagePreview] = useState<{
     path: string;
     siblings: ImageSibling[];
@@ -39,7 +40,7 @@ export default function App() {
           fileType={fileType}
           dir={dir}
           threshold={threshold}
-          onPlayVideo={(path, location) => setVideoPreview({ path, location })}
+          onPlayVideo={(path, location, hits) => setVideoPreview({ path, location, hits })}
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
           onResultCount={setResultCount}
         />
@@ -49,6 +50,7 @@ export default function App() {
         <VideoPreview
           path={videoPreview.path}
           location={videoPreview.location}
+          hits={videoPreview.hits}
           onClose={() => setVideoPreview(null)}
         />
       )}

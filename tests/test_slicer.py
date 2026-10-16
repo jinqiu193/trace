@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """slicer 切片逻辑单测（token 计数用假函数，不依赖模型）。"""
 
 from __future__ import annotations

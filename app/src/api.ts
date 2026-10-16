@@ -37,6 +37,14 @@ export interface TaskBrief {
   errors?: number;
 }
 
+export interface VideoHit {
+  t: number;
+  loc: string;
+  snippet: string;
+  source: string;
+  score: number;
+}
+
 export interface SearchResult {
   score: number;
   path: string;
@@ -53,6 +61,7 @@ export interface SearchResult {
   weak_fallback?: boolean;
   fuzzy_match?: boolean;
   nearby_frames?: { t: number; loc: string }[];
+  hits?: VideoHit[];
   confidence?: "high" | "medium" | "low";
 }
 

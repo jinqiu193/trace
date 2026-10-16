@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """searchtext 纯逻辑单测（不依赖模型/数据库）。"""
 
 from __future__ import annotations

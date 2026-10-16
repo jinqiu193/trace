@@ -770,3 +770,79 @@ html, body, #root {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* ---- 视频浏览器（VideoPreview 升级版） ---- */
+.vb-window { width: min(1080px, 92vw); }
+.vb-layout { display: flex; gap: 10px; min-height: 0; }
+.vb-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.vb-timeline {
+  position: relative; height: 34px; margin: 2px 6px;
+  cursor: pointer; user-select: none;
+}
+.vb-timeline-track {
+  position: absolute; left: 0; right: 0; top: 14px; height: 6px;
+  background: rgba(255, 255, 255, 0.14); border-radius: 3px;
+}
+.vb-timeline-seg {
+  position: absolute; top: 14px; height: 6px;
+  background: rgba(56, 189, 248, 0.35); border-radius: 3px;
+  pointer-events: none;
+}
+.vb-timeline-progress {
+  position: absolute; left: 0; top: 14px; height: 6px;
+  background: rgba(56, 189, 248, 0.85); border-radius: 3px 0 0 3px;
+  pointer-events: none;
+}
+.vb-timeline-cursor {
+  position: absolute; top: 8px; width: 2px; height: 18px;
+  background: #e2e8f0; border-radius: 1px; transform: translateX(-1px);
+  pointer-events: none; box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+}
+.vb-hit-marker {
+  position: absolute; top: 10px; width: 4px; height: 14px;
+  background: #f43f5e; border-radius: 2px; transform: translateX(-2px);
+  cursor: pointer; transition: height 0.12s ease, top 0.12s ease;
+}
+.vb-hit-marker:hover, .vb-hit-marker.active {
+  height: 20px; top: 7px; background: #fb7185;
+  box-shadow: 0 0 6px rgba(244, 63, 94, 0.8);
+}
+
+.vb-time-row {
+  display: flex; align-items: baseline; gap: 8px; margin: 0 6px;
+  font-size: 12px; color: #94a3b8; font-variant-numeric: tabular-nums;
+}
+.vb-time-cur { color: #e2e8f0; font-size: 14px; font-weight: 600; }
+.vb-time-seginfo { margin-left: auto; }
+
+.vb-hits {
+  flex: 0 0 240px; max-height: 420px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 4px;
+  background: rgba(255, 255, 255, 0.04); border-radius: 8px;
+}
+.vb-hits-title {
+  font-size: 12px; color: #94a3b8; padding: 2px 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.vb-hit {
+  display: flex; flex-direction: column; gap: 3px; text-align: left;
+  padding: 6px 8px; border: 1px solid transparent; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03); color: inherit;
+  cursor: pointer; font: inherit;
+}
+.vb-hit:hover { background: rgba(56, 189, 248, 0.1); border-color: rgba(56, 189, 248, 0.3); }
+.vb-hit.active { background: rgba(244, 63, 94, 0.12); border-color: rgba(244, 63, 94, 0.45); }
+.vb-hit-head { display: flex; align-items: center; gap: 6px; }
+.vb-hit-loc { color: #38bdf8; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12px; }
+.vb-hit-src {
+  font-size: 10px; padding: 1px 5px; border-radius: 4px; line-height: 1.4;
+}
+.vb-hit-src.sem { background: rgba(167, 139, 250, 0.2); color: #c4b5fd; }
+.vb-hit-src.kw { background: rgba(163, 230, 53, 0.15); color: #bef264; }
+.vb-hit-score { margin-left: auto; font-size: 10px; color: #64748b; }
+.vb-hit-snippet {
+  font-size: 11px; color: #cbd5e1; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.vb-hits-more { font-size: 10px; color: #64748b; text-align: center; padding: 4px 0 2px; }

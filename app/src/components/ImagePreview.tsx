@@ -138,13 +138,11 @@ export function ImagePreview({ path, siblings, onClose, onNavigate }: ImagePrevi
       if (e.key === "ArrowRight" && hasNext) { e.preventDefault(); goNext(); return; }
       if (e.key === "+" || e.key === "=") {
         e.preventDefault();
-        const rect = containerRef.current!.getBoundingClientRect();
         zoomAt(zoom * BTN_STEP, -tx, -ty);
         return;
       }
       if (e.key === "-" || e.key === "_") {
         e.preventDefault();
-        const rect = containerRef.current!.getBoundingClientRect();
         zoomAt(zoom / BTN_STEP, -tx, -ty);
         return;
       }

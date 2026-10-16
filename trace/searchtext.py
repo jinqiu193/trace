@@ -346,6 +346,13 @@ _WATERMARK_ID_RE = re.compile(
     r"(?<![a-zA-Z])(?i:id|no)\s*[:：]?\s*[\d\-]+|编号\s*[:：]?\s*[\d\-]+"
 )
 
+# 替换必须"最长优先"：WATERMARK_TERMS 是 set，迭代顺序随 hash 种子随机。
+# 若 "699pic" 先于 "699pic.com" 替换，会残留 ".com"（ascii token），
+# 导致 is_watermark_only 判定随机翻转（PYTHONHASHSEED 竞态）。
+_WATERMARK_TERMS_BY_LEN: tuple[str, ...] = tuple(
+    sorted(WATERMARK_TERMS, key=len, reverse=True)
+)
+
 
 def strip_watermarks(text: str) -> str:
     """从文本里删掉水印词。删后空白折叠。
@@ -355,7 +362,7 @@ def strip_watermarks(text: str) -> str:
     if not text:
         return ""
     out = text
-    for w in WATERMARK_TERMS:
+    for w in _WATERMARK_TERMS_BY_LEN:
         if w in out:
             out = out.replace(w, " ")
     out = _WATERMARK_ID_RE.sub(" ", out)
@@ -373,7 +380,7 @@ def is_watermark_only(s: str) -> bool:
     if not s:
         return True
     cleaned = s.lower()
-    for w in WATERMARK_TERMS:
+    for w in _WATERMARK_TERMS_BY_LEN:
         cleaned = cleaned.replace(w, " ")
     cleaned = _WATERMARK_ID_RE.sub(" ", cleaned)
     # 去掉空白、标点、数字、ascii 符号

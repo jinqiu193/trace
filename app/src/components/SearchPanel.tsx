@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, SearchResult } from "../api";
+import { api, SearchResult, VideoHit } from "../api";
 
 const FILE_TYPE_COLORS: Record<string, string> = {
   image: "#e879f9",
@@ -40,7 +40,7 @@ export interface SearchPanelProps {
   fileType?: string;
   dir?: string;
   threshold?: number;
-  onPlayVideo?: (path: string, location: string) => void;
+  onPlayVideo?: (path: string, location: string, hits?: VideoHit[]) => void;
   onPreviewImage?: (path: string, siblings: ImageSibling[]) => void;
   onResultCount?: (n: number) => void;
 }
@@ -67,7 +67,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   // 图片 → 走内嵌图片预览（带翻页）；其他 → 系统默认应用
   const handleOpen = (r: SearchResult) => {
     if (r.file_type === "video" && r.location && onPlayVideo) {
-      onPlayVideo(r.path, r.location);
+      onPlayVideo(r.path, r.location, r.hits);
       return;
     }
     if (r.file_type === "image" && onPreviewImage) {
@@ -80,9 +80,9 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     api.openPath(r.path, r.location || undefined).catch(err => console.error(err));
   };
 
-  const handleOpenAt = (path: string, location: string) => {
+  const handleOpenAt = (path: string, location: string, hits?: VideoHit[]) => {
     if (onPlayVideo) {
-      onPlayVideo(path, location);
+      onPlayVideo(path, location, hits);
     } else {
       api.openPath(path, location).catch(err => console.error(err));
     }
@@ -299,7 +299,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
                         src={`${api.baseUrl()}/api/video/frame?path=${encodeURIComponent(r.path)}&t=${f.t.toFixed(2)}&max_w=160`}
                         alt={f.loc}
                         className={"frame-strip-thumb" + (f.loc === r.location ? " active" : "")}
-                        onClick={(e) => { e.stopPropagation(); handleOpenAt(r.path, f.loc); }}
+                        onClick={(e) => { e.stopPropagation(); handleOpenAt(r.path, f.loc, r.hits); }}
                         title={`跳到 ${f.loc} 播放`}
                       />
                     ))}
