@@ -105,50 +105,76 @@ class Indexer:
                 "vector": vec,
             }]
         elif kind == "video" and self.embedder.vision_session is not None:
-            # 视频帧 + 音轨：aHash 去重 + max_w=1024 缩放 + 30s 音频窗口
+            # 视频帧 + 音轨：抽帧/解音轨在后台线程（解码多线程已开），
+            # 主线程攒批嵌入（主模型批量 2.3x）——三阶段流水线重叠。
             # 文件名线索经 _kw_with_name 注入（文件名有语义的视频能被 FTS 命中）
             from . import readers as _rd
+            import queue as _queue
 
-            for raw in _rd.iter_video_slices(path, self.embedder):
-                kw_extra = raw.get("keywords", "")
-                kw_combined = _kw_with_name(path, kw_extra)
-                text = _clean(raw.get("text") or "") or path.stem
-                slices.append({
-                    "modality": raw["modality"],
-                    "location": raw["location"],
-                    "text": text,
-                    "keywords": kw_combined,
-                    "vector": raw.get("vector"),
-                })
-            if getattr(self.embedder, "audio_session", None) is not None:
+            _SENTINEL = object()
+            frame_q: "queue.Queue" = _queue.Queue(maxsize=32)
+            audio_q: "queue.Queue" = _queue.Queue(maxsize=4)
+
+            def _produce_frames():
                 try:
-                    for raw in _rd.iter_audio_slices(
-                            path, self.embedder, source_kind="video_sound"):
-                        kw_combined = _kw_with_name(path, raw.get("keywords", ""))
-                        text = _clean(raw.get("text") or "") or path.stem
-                        slices.append({
-                            "modality": raw["modality"],
-                            "location": raw["location"],
-                            "text": text,
-                            "keywords": kw_combined,
-                            "vector": raw.get("vector"),
-                        })
+                    for raw in _rd.iter_video_slices(path, embedder=None):
+                        frame_q.put(raw)
                 except Exception:
-                    pass  # 视频无音轨/音轨解码失败：忽略，不影响视频帧
+                    pass
+                finally:
+                    frame_q.put(_SENTINEL)
+
+            def _produce_audio():
+                try:
+                    for raw in _rd.iter_audio_slices(path, embedder=None,
+                                                     source_kind="video_sound"):
+                        audio_q.put(raw)
+                except Exception:
+                    pass
+                finally:
+                    audio_q.put(_SENTINEL)
+
+            threading.Thread(target=_produce_frames, daemon=True).start()
+            threading.Thread(target=_produce_audio, daemon=True).start()
+
+            def _drain(q):
+                while True:
+                    item = q.get()
+                    if item is _SENTINEL:
+                        return
+                    yield item
+
+            IMG_BATCH = 8
+            fbuf = []
+            for raw in _drain(frame_q):
+                fbuf.append(raw)
+                if len(fbuf) >= IMG_BATCH:
+                    self._flush_video_frames(path, fbuf, slices)
+            self._flush_video_frames(path, fbuf, slices)
+
+            if getattr(self.embedder, "audio_session", None) is not None:
+                AUD_BATCH = 8
+                abuf = []
+                for raw in _drain(audio_q):
+                    abuf.append(raw)
+                    if len(abuf) >= AUD_BATCH:
+                        self._flush_audio_windows(path, abuf, slices)
+                self._flush_audio_windows(path, abuf, slices)
+            else:
+                # 无 audio 编码器：排空队列避免生产者线程卡在 put 上
+                for _ in _drain(audio_q):
+                    pass
         elif kind == "audio" and getattr(self.embedder, "audio_session", None) is not None:
-            # 独立音频文件：30s 窗口，audio encoder 嵌入
+            # 独立音频文件：30s 窗口批量嵌入
             from . import readers as _rd
 
-            for raw in _rd.iter_audio_slices(path, self.embedder, source_kind="audio"):
-                kw_combined = _kw_with_name(path, raw.get("keywords", ""))
-                text = _clean(raw.get("text") or "") or path.stem
-                slices.append({
-                    "modality": raw["modality"],
-                    "location": raw["location"],
-                    "text": text,
-                    "keywords": kw_combined,
-                    "vector": raw.get("vector"),
-                })
+            AUD_BATCH = 8
+            abuf = []
+            for raw in _rd.iter_audio_slices(path, embedder=None, source_kind="audio"):
+                abuf.append(raw)
+                if len(abuf) >= AUD_BATCH:
+                    self._flush_audio_windows(path, abuf, slices)
+            self._flush_audio_windows(path, abuf, slices)
         elif kind in ("image", "audio", "video"):
             pass  # 编码器未就绪，仅登记元数据
         else:
@@ -164,6 +190,49 @@ class Indexer:
                         "keywords": kw_combined,
                     })
         return slices
+
+    # ------------------------------------------------------------------ #
+    # 视频/音频批量 flush（流水线消费端）
+    # ------------------------------------------------------------------ #
+    def _flush_video_frames(self, path: Path, buf: list[dict], out: list[dict]) -> None:
+        """攒批的视频帧 → 批量嵌入 → 组装切片 dict 追加进 out。"""
+        if not buf:
+            return
+        try:
+            vecs = self.embedder.embed_images_pil_batch([r["_pil"] for r in buf])
+        except Exception:
+            vecs = [None] * len(buf)
+        for raw, vec in zip(buf, vecs):
+            kw_combined = _kw_with_name(path, raw.get("keywords", ""))
+            text = _clean(raw.get("text") or "") or path.stem
+            out.append({
+                "modality": raw["modality"],
+                "location": raw["location"],
+                "text": text,
+                "keywords": kw_combined,
+                "vector": vec,
+            })
+        buf.clear()
+
+    def _flush_audio_windows(self, path: Path, buf: list[dict], out: list[dict]) -> None:
+        """攒批的音频窗 → 批量嵌入 → 组装切片 dict 追加进 out。"""
+        if not buf:
+            return
+        try:
+            vecs = self.embedder.embed_audio_pcm_batch([r["_pcm"] for r in buf], sr=16000)
+        except Exception:
+            vecs = [None] * len(buf)
+        for raw, vec in zip(buf, vecs):
+            kw_combined = _kw_with_name(path, raw.get("keywords", ""))
+            text = _clean(raw.get("text") or "") or path.stem
+            out.append({
+                "modality": raw["modality"],
+                "location": raw["location"],
+                "text": text,
+                "keywords": kw_combined,
+                "vector": vec,
+            })
+        buf.clear()
 
     def _index_one(self, path: Path, st, full: bool, stats: dict) -> None:
         """处理单个文件：提取切片 → 向量化 → 入库。所有异常 per-file 吞掉记 errors。"""
@@ -260,8 +329,11 @@ class Indexer:
             if cancel is not None and cancel.is_set():
                 stats["cancelled"] = True
                 break
-            stats["scanned"] += 1
             spath = str(path)
+            # 进入文件前先上报 current（大文件嵌入可达数分钟）
+            if progress:
+                progress(dict(stats, current=spath))
+            stats["scanned"] += 1
             seen.add(spath)
             try:
                 st = path.stat()
@@ -315,6 +387,9 @@ class Indexer:
             if cancel is not None and cancel.is_set():
                 stats["cancelled"] = True
                 break
+            # 进入文件前先上报（大文件嵌入可达数分钟，首个进度不能等它完成才有）
+            if progress:
+                progress(dict(stats, current=spath))
             path = Path(spath)
             stats["scanned"] += 1
             try:
@@ -333,8 +408,7 @@ class Indexer:
             except Exception as e:
                 stats["errors"] += 1
                 log.warning("定向索引失败 %s: %s", spath, e)
-            if progress:
-                progress(dict(stats, current=spath))
+
         stats["seconds"] = round(time.time() - t0, 1)
         if progress:
             progress(dict(stats))

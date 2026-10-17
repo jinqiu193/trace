@@ -76,6 +76,18 @@ def _register_cuda_dlls() -> None:
             cur = os.environ.get("PATH", "")
             ctypes.windll.kernel32.SetEnvironmentVariableW(
                 "PATH", os.pathsep.join(dirs + [cur]))
+            # cuDNN 9 子库（cudnn_engines_precompiled64_9.dll 等）在 Conv 节点
+            # 首次运行时才 lazy 加载，走 LoadLibrary 传统搜索——既不认
+            # add_dll_directory，也找不到上面刚改的 PATH（2026-10-17 实测：
+            # 注册后 Conv 仍报 "Could not locate cudnn_engines_precompiled64_9.dll"
+            # 且整个 session 静默 fallback CPU）。预加载全家 dll 进进程后，
+            # 后续同 dll 的 LoadLibrary 直接命中已加载模块。
+            for p in dirs:
+                for dll in sorted(glob.glob(os.path.join(p, "cudnn*.dll"))):
+                    try:
+                        ctypes.CDLL(dll)
+                    except OSError:
+                        pass
     except Exception:
         pass
 
@@ -318,6 +330,96 @@ class Embedder:
         if norm > 0:
             vec = vec / norm
         return vec.astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    # 批量前向（索引流水线专用）：主模型 CPU 批量实测 2.3x（B=8）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _audio_token_seq(n: int) -> str:
+        prefix = config.IMAGE_INDEX_PREFIX  # 跨模态对齐（与 image 共用同一开关）
+        BOA = "<|audio>"         # 256000
+        AUDIO_T = "<|audio|>"    # 258881（占位，merge 按此 id 替换）
+        EOA = "<audio|>"         # 258883
+        return (prefix + BOA + AUDIO_T * n + EOA) if prefix else (BOA + AUDIO_T * n + EOA)
+
+    def _run_pooled_many(self, modality: str, feats_list: list[np.ndarray]) -> list[np.ndarray]:
+        """主模型批量前向：image_features / audio_features 列表 → 768 维向量列表。
+
+        等长 token 序列分到同一批；不等长自动按长度分组（不 pad，
+        保证输出与逐条前向数值一致，实测偏差 0.000000）。
+        单批失败时该组逐条退化，不炸整个流水线。
+        """
+        if not feats_list:
+            return []
+        enc_list = []
+        for feats in feats_list:
+            n = feats.shape[0]
+            if modality == "image":
+                seq = (config.IMAGE_INDEX_PREFIX + config.BOI_TOKEN
+                       + config.IMAGE_TOKEN * n + config.EOI_TOKEN)
+            else:
+                seq = self._audio_token_seq(n)
+            enc_list.append(self.tok.encode(seq, add_special_tokens=True))
+
+        out: list[np.ndarray] = [np.zeros(0, dtype=np.float32)] * len(feats_list)
+        by_len: dict[int, list[int]] = {}
+        for i, enc in enumerate(enc_list):
+            by_len.setdefault(len(enc.ids), []).append(i)
+
+        feats_key = "image_features" if modality == "image" else "audio_features"
+        for _L, idxs in by_len.items():
+            B = len(idxs)
+            ids_b = np.zeros((B, _L), dtype=np.int64)
+            mask_b = np.zeros((B, _L), dtype=np.int64)
+            for r, i in enumerate(idxs):
+                enc = enc_list[i]
+                ids_b[r] = enc.ids
+                mask_b[r] = enc.attention_mask
+            feeds = {
+                "input_ids": ids_b,
+                "attention_mask": mask_b,
+                feats_key: np.concatenate([feats_list[i] for i in idxs], axis=0).astype(np.float32),
+            }
+            for k in ("image_features", "video_features", "audio_features"):
+                if k != feats_key:
+                    feeds[k] = np.zeros((0, 512), dtype=np.float32)
+            try:
+                outs = self.session.run(None, feeds)
+                named = dict(zip(self.output_names, outs))
+                if self._pooled_out is None or self._pooled_out not in named:
+                    raise RuntimeError("pooled output missing")
+                vecs = np.asarray(named[self._pooled_out], dtype=np.float32)
+                if vecs.ndim == 1:
+                    vecs = vecs.reshape(1, -1)
+                for r, i in enumerate(idxs):
+                    v = vecs[r].reshape(-1)
+                    nv = np.linalg.norm(v)
+                    out[i] = (v / nv).astype(np.float32) if nv > 0 else v.astype(np.float32)
+            except Exception:
+                for i in idxs:
+                    out[i] = (self._run_with_image_features(feats_list[i]) if modality == "image"
+                              else self._run_with_audio_features(feats_list[i]))
+        return out
+
+    def embed_images_pil_batch(self, imgs) -> list[np.ndarray]:
+        """多帧批量嵌入：预处理 + vision 逐条（批量实测反而慢）+ 主模型批量。"""
+        from . import vision
+        feats_list = []
+        for im in imgs:
+            pv, pos, _ = vision.preprocess_pil(im)
+            feats_list.append(self._encode_vision_features(pv, pos))
+        return self._run_pooled_many("image", feats_list)
+
+    def embed_audio_pcm_batch(self, pcms, sr: int = 16000) -> list:
+        """多窗口音频批量嵌入；编码器未加载/特征失败的窗口返回 None。"""
+        feats_list = [self._encode_audio_features(p, sr=sr) for p in pcms]
+        valid = [(i, f) for i, f in enumerate(feats_list) if f is not None]
+        out: list = [None] * len(pcms)
+        if valid:
+            vecs = self._run_pooled_many("audio", [f for _, f in valid])
+            for (i, _), v in zip(valid, vecs):
+                out[i] = v
+        return out
 
     def embed_image(self, path) -> np.ndarray:
         """图片嵌入：<bos> <|image> <|image|>×N <image|> <eos>（无 task 前缀）。
