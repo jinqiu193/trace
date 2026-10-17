@@ -101,6 +101,21 @@ async def lifespan(app: FastAPI):
         from .watcher import RootWatcher
         watcher = RootWatcher(state, state.tasks)
         watcher.start()
+
+    def _warm() -> None:
+        # 后台预热：① Embedder 构造（冷进程 ~9s：模型磁盘冷读 + dll 初始化），
+        # 否则全部压在用户首次搜索上；② scipy.signal 冷导入（实测 4.2s，
+        # 首个音频窗口的 mel 会被它卡住）。均不阻塞 uvicorn 起服务。
+        try:
+            from scipy.signal import stft  # noqa: F401
+        except Exception:
+            pass
+        try:
+            state.get_embedder()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, name="embedder-warmup", daemon=True).start()
     try:
         yield
     finally:
