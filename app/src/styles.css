@@ -70,6 +70,13 @@ select:focus-visible {
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-glow);
 }
 
+/* 嵌入式输入（外层容器已有 :focus-within 样式）不吃全局 focus ring，
+   避免外扩 shadow 压在相邻图标上造成视觉错位 */
+.search-box input:focus-visible,
+.dir-input:focus-visible {
+  box-shadow: none;
+}
+
 /* ---- 通用动画 ---- */
 @keyframes rise {
   from { opacity: 0; transform: translateY(5px); }
