@@ -235,7 +235,8 @@ def _open_video_threaded(path):
 
 
 def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
-                             ahash_tolerance: int, max_frames: int) -> Iterator[dict]:
+                             ahash_tolerance: int, max_frames: int,
+                             cancel=None) -> Iterator[dict]:
     """场景模式抽帧：只解关键帧（skip_frame=NONKEY）+ aHash 场景检测 + 超上限等距抽稀。
 
     用户口径（2026-10-17）：覆盖视频大部分场景即可，静止/缓变画面忽略，
@@ -243,6 +244,7 @@ def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
     第一遍只算 aHash 不留像素，定下保留帧时间点；
     第二遍同参数再解一遍，命中帧缩放 512px 产出。
     实测 65min 视频：501 关键帧 / 每遍 ~9s（vs tick 模式 seek 抽帧 87s+335 帧嵌入）。
+    cancel: threading.Event；置位后在解码循环边界立即返回（用户取消索引）。
     """
     import av
     limit = max(1, min(max_frames, config.VIDEO_SCENE_MAX_SLICES))
@@ -256,6 +258,8 @@ def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
     try:
         v_stream.codec_context.skip_frame = "NONKEY"  # 丢弃全部 P/B 帧
         for f in container.decode(v_stream):
+            if cancel is not None and cancel.is_set():
+                return
             sigs.append(_frame_signature(f.to_ndarray(format="bgr24"),
                                          side=config.VIDEO_AHASH_SIDE))
             tss.append(f.time or 0.0)
@@ -288,6 +292,8 @@ def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
     try:
         v_stream.codec_context.skip_frame = "NONKEY"
         for i, f in enumerate(container.decode(v_stream)):
+            if cancel is not None and cancel.is_set():
+                return
             if i not in keep:
                 continue
             actual_t = tss[i] if i < len(tss) else (f.time or 0.0)
@@ -316,7 +322,8 @@ def iter_video_slices(path: Path, embedder=None, *,
                      sample_interval_sec: float | None = None,
                      max_frames: int = 1200,
                      ahash_tolerance: int | None = None,
-                     max_pixel: int | None = None) -> Iterator[dict]:
+                     max_pixel: int | None = None,
+                     cancel=None) -> Iterator[dict]:
     """视频帧切片（两种模式，config.VIDEO_SCENE_MODE 控制）：
 
     - scene（默认）：skip_frame=NONKEY 只解关键帧 + aHash 场景检测 +
@@ -369,7 +376,8 @@ def iter_video_slices(path: Path, embedder=None, *,
         try:
             yield from _iter_video_scene_slices(
                 path, embedder, max_pixel=max_pixel,
-                ahash_tolerance=ahash_tolerance, max_frames=max_frames)
+                ahash_tolerance=ahash_tolerance, max_frames=max_frames,
+                cancel=cancel)
             return
         except Exception:
             pass  # 场景路径失败 → 回退下方 tick 均匀采样
@@ -407,6 +415,8 @@ def iter_video_slices(path: Path, embedder=None, *,
             #   直接赋 Fraction 跨版本兼容）
             v_stream.time_base = Fraction(1, 1000)
             for target_t in times:
+                if cancel is not None and cancel.is_set():
+                    return
                 if out_count >= max_frames:
                     break
                 target_ms = int(target_t * 1000)
@@ -462,6 +472,9 @@ def iter_video_slices(path: Path, embedder=None, *,
         last_sig = None
         out_count = 0
         for target_t in times:
+            if cancel is not None and cancel.is_set():
+                cap.release()
+                return
             if out_count >= max_frames:
                 break
             cap.set(cv2.CAP_PROP_POS_MSEC, target_t * 1000.0)
@@ -514,7 +527,8 @@ def iter_audio_windows(path: Path, *,
                       hop_sec: float | None = None,
                       min_sec: float = 2.0,
                       silence_rms: float = 0.003,
-                      sr: int = 16000) -> Iterator[tuple[np.ndarray, float, float]]:
+                      sr: int = 16000,
+                      cancel=None) -> Iterator[tuple[np.ndarray, float, float]]:
     """音频文件（或视频音轨）→ (int16 PCM, start_s, end_s) 流。
 
     仿 DigUp AudioExtractor.windows：
@@ -564,6 +578,8 @@ def iter_audio_windows(path: Path, *,
             return buffer[:count].copy()
 
         for frame in container.decode(audio_stream):
+            if cancel is not None and cancel.is_set():
+                return
             resampled = resampler.resample(frame)
             if isinstance(resampled, list):
                 resampled = resampled[0] if resampled else None

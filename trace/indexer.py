@@ -84,8 +84,12 @@ class Indexer:
     # ------------------------------------------------------------------ #
     # 单文件处理（index_root 与 index_paths 共用）
     # ------------------------------------------------------------------ #
-    def _extract_slices(self, path: Path, kind: str, stats: dict) -> list[dict]:
-        """文件 → 切片列表。任何解析异常都降级为 metadata_only，不炸整轮。"""
+    def _extract_slices(self, path: Path, kind: str, stats: dict) -> list[dict] | None:
+        """文件 → 切片列表。任何解析异常都降级为 metadata_only，不炸整轮。
+
+        返回 None = 用户取消（视频/音频长流水线中检到 cancel 事件），
+        调用方应放弃该文件不入库。
+        """
         slices: list[dict] = []
         if kind == "image" and self.embedder.vision_session is not None:
             # 图片语义切片：视觉编码器向量 + OCR 关键词（DigUp：OCR 不进向量）
@@ -108,16 +112,20 @@ class Indexer:
             # 视频帧 + 音轨：抽帧/解音轨在后台线程（解码多线程已开），
             # 主线程攒批嵌入（主模型批量 2.3x）——三阶段流水线重叠。
             # 文件名线索经 _kw_with_name 注入（文件名有语义的视频能被 FTS 命中）
+            # 取消：cancel 事件穿透进 readers 解码循环 + 消费端批间检查，
+            # 返回 None 表示被取消——调用方放弃该文件（不入库，下次重跑）。
             from . import readers as _rd
             import queue as _queue
 
             _SENTINEL = object()
+            _cancel = getattr(self, "_cancel", None)
             frame_q: "queue.Queue" = _queue.Queue(maxsize=32)
             audio_q: "queue.Queue" = _queue.Queue(maxsize=4)
 
             def _produce_frames():
                 try:
-                    for raw in _rd.iter_video_slices(path, embedder=None):
+                    for raw in _rd.iter_video_slices(path, embedder=None,
+                                                     cancel=_cancel):
                         frame_q.put(raw)
                 except Exception:
                     pass
@@ -127,7 +135,8 @@ class Indexer:
             def _produce_audio():
                 try:
                     for raw in _rd.iter_audio_slices(path, embedder=None,
-                                                     source_kind="video_sound"):
+                                                     source_kind="video_sound",
+                                                     cancel=_cancel):
                         audio_q.put(raw)
                 except Exception:
                     pass
@@ -146,19 +155,38 @@ class Indexer:
 
             IMG_BATCH = 8
             fbuf = []
+            cancelled = False
             for raw in _drain(frame_q):
+                if _cancel is not None and _cancel.is_set():
+                    cancelled = True
+                    break
                 fbuf.append(raw)
                 if len(fbuf) >= IMG_BATCH:
                     self._flush_video_frames(path, fbuf, slices)
+            if cancelled:
+                # 排空两队列：生产者（生成器内已检 cancel）会很快送出 SENTINEL 退出，
+                # 避免线程卡在 put 上占着视频文件句柄
+                for _ in _drain(frame_q):
+                    pass
+                for _ in _drain(audio_q):
+                    pass
+                return None
             self._flush_video_frames(path, fbuf, slices)
 
             if getattr(self.embedder, "audio_session", None) is not None:
                 AUD_BATCH = 8
                 abuf = []
                 for raw in _drain(audio_q):
+                    if _cancel is not None and _cancel.is_set():
+                        cancelled = True
+                        break
                     abuf.append(raw)
                     if len(abuf) >= AUD_BATCH:
                         self._flush_audio_windows(path, abuf, slices)
+                if cancelled:
+                    for _ in _drain(audio_q):
+                        pass
+                    return None
                 self._flush_audio_windows(path, abuf, slices)
             else:
                 # 无 audio 编码器：排空队列避免生产者线程卡在 put 上
@@ -168,9 +196,13 @@ class Indexer:
             # 独立音频文件：30s 窗口批量嵌入
             from . import readers as _rd
 
+            _cancel = getattr(self, "_cancel", None)
             AUD_BATCH = 8
             abuf = []
-            for raw in _rd.iter_audio_slices(path, embedder=None, source_kind="audio"):
+            for raw in _rd.iter_audio_slices(path, embedder=None, source_kind="audio",
+                                             cancel=_cancel):
+                if _cancel is not None and _cancel.is_set():
+                    return None
                 abuf.append(raw)
                 if len(abuf) >= AUD_BATCH:
                     self._flush_audio_windows(path, abuf, slices)
@@ -249,6 +281,9 @@ class Indexer:
         status = "indexed"
         try:
             slices = self._extract_slices(path, kind, stats)
+            if slices is None:
+                # 用户取消：放弃该文件（不 upsert，保留旧记录），下次任务重跑
+                return
             if not slices and kind in ("image", "audio", "video"):
                 status = "metadata_only"
             elif not slices:
@@ -302,6 +337,13 @@ class Indexer:
                       结果，stats["cancelled"]=True）。
         """
         root_path = Path(root).resolve()
+        self._cancel = cancel  # 供 _extract_slices 流水线批间检查
+        try:
+            return self._index_root_impl(root, full, progress, cancel, root_path)
+        finally:
+            self._cancel = None
+
+    def _index_root_impl(self, root: str, full: bool, progress, cancel, root_path: Path) -> dict:
 
         # 指纹检查：模型/prompt/切片参数变化后，旧向量不可与新向量比较（DigUp 同款）
         fp_now = config.FINGERPRINT
@@ -383,31 +425,35 @@ class Indexer:
         stats = {"scanned": 0, "indexed": 0, "skipped": 0, "metadata_only": 0,
                  "errors": 0, "removed": 0, "total": len(paths), "cancelled": False}
         t0 = time.time()
-        for spath in paths:
-            if cancel is not None and cancel.is_set():
-                stats["cancelled"] = True
-                break
-            # 进入文件前先上报（大文件嵌入可达数分钟，首个进度不能等它完成才有）
-            if progress:
-                progress(dict(stats, current=spath))
-            path = Path(spath)
-            stats["scanned"] += 1
-            try:
-                st = path.stat()
-            except OSError:
-                # 文件已消失（watcher 检测后又被删）：对账删索引
-                if self.store.delete_file(spath):
-                    stats["removed"] += 1
-                continue
-            kind = readers.classify(path)
-            if kind == "other":
-                continue
-            try:
-                with self.store.batch():
-                    self._index_one(path, st, False, stats)
-            except Exception as e:
-                stats["errors"] += 1
-                log.warning("定向索引失败 %s: %s", spath, e)
+        self._cancel = cancel  # 供 _extract_slices 流水线批间检查
+        try:
+            for spath in paths:
+                if cancel is not None and cancel.is_set():
+                    stats["cancelled"] = True
+                    break
+                # 进入文件前先上报（大文件嵌入可达数分钟，首个进度不能等它完成才有）
+                if progress:
+                    progress(dict(stats, current=spath))
+                path = Path(spath)
+                stats["scanned"] += 1
+                try:
+                    st = path.stat()
+                except OSError:
+                    # 文件已消失（watcher 检测后又被删）：对账删索引
+                    if self.store.delete_file(spath):
+                        stats["removed"] += 1
+                    continue
+                kind = readers.classify(path)
+                if kind == "other":
+                    continue
+                try:
+                    with self.store.batch():
+                        self._index_one(path, st, False, stats)
+                except Exception as e:
+                    stats["errors"] += 1
+                    log.warning("定向索引失败 %s: %s", spath, e)
+        finally:
+            self._cancel = None
 
         stats["seconds"] = round(time.time() - t0, 1)
         if progress:
