@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, IndexStats, IndexTaskStatus } from "../api";
+import { IconPlus, IconRefresh, IconTrash, IconStop } from "../icons";
 
 export function RootManager({ onChanged }: { onChanged?: () => void }) {
   const [roots, setRoots] = useState<string[]>([]);
@@ -114,8 +115,8 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
       <div className="panel-header">
         <span>索引范围</span>
         <div>
-          <button className="btn-sm" onClick={addRoot} disabled={busy}>+ 添加</button>
-          <button className="btn-sm" onClick={reindexAll} disabled={busy || roots.length === 0}>↻ 重建</button>
+          <button className="btn-sm" onClick={addRoot} disabled={busy}><IconPlus size={12} /> 添加</button>
+          <button className="btn-sm" onClick={reindexAll} disabled={busy || roots.length === 0}><IconRefresh size={12} /> 重建</button>
         </div>
       </div>
       <div className="root-list">
@@ -156,9 +157,9 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
                 )}
               </div>
               {isRunning
-                ? <button className="btn-xs" title="取消索引" onClick={cancelTask}>■</button>
-                : <button className="btn-xs" title="重新索引" onClick={() => indexPath(path)} disabled={busy}>↻</button>}
-              <button className="btn-xs" title="从索引移除" onClick={() => removeRoot(path)} disabled={busy}>×</button>
+                ? <button className="btn-xs" title="取消索引" onClick={cancelTask}><IconStop size={12} /></button>
+                : <button className="btn-xs" title="重新索引" onClick={() => indexPath(path)} disabled={busy}><IconRefresh size={12} /></button>}
+              <button className="btn-xs" title="从索引移除" onClick={() => removeRoot(path)} disabled={busy}><IconTrash size={12} /></button>
             </div>
           );
         })}

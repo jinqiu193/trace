@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import {
+  IconClose, IconMaximize, IconZoomIn, IconZoomOut,
+  IconChevronLeft, IconChevronRight, IconFolderOpen,
+} from "../icons";
 
 export interface ImagePreviewProps {
   path: string;
@@ -172,14 +176,14 @@ export function ImagePreview({ path, siblings, onClose, onNavigate }: ImagePrevi
             </span>
           )}
           <div className="image-preview-toolbar">
-            <button onClick={(e) => { e.stopPropagation(); fitToWindow(); }} title="适应窗口 (F)">⤢</button>
-            <button onClick={(e) => { e.stopPropagation(); oneToOne(); }} title="1:1 (0)">1:1</button>
-            <button onClick={(e) => { e.stopPropagation(); zoomAt(zoom / BTN_STEP, -tx, -ty); }} title="缩小 (-)">−</button>
-            <button onClick={(e) => { e.stopPropagation(); zoomAt(zoom * BTN_STEP, -tx, -ty); }} title="放大 (+)">+</button>
-            {hasPrev && <button onClick={(e) => { e.stopPropagation(); goPrev(); }} title="上一张 (←)">‹</button>}
-            {hasNext && <button onClick={(e) => { e.stopPropagation(); goNext(); }} title="下一张 (→)">›</button>}
-            <button onClick={(e) => { e.stopPropagation(); api.revealInFolder(path); }} title="在文件管理器中显示">📂</button>
-            <button className="image-preview-close" onClick={onClose} title="关闭 (Esc)">✕</button>
+            <button onClick={(e) => { e.stopPropagation(); fitToWindow(); }} title="适应窗口 (F)"><IconMaximize size={13} /></button>
+            <button onClick={(e) => { e.stopPropagation(); oneToOne(); }} title="1:1 原始尺寸 (0)">1:1</button>
+            <button onClick={(e) => { e.stopPropagation(); zoomAt(zoom / BTN_STEP, -tx, -ty); }} title="缩小 (−)"><IconZoomOut size={13} /></button>
+            <button onClick={(e) => { e.stopPropagation(); zoomAt(zoom * BTN_STEP, -tx, -ty); }} title="放大 (+)"><IconZoomIn size={13} /></button>
+            {hasPrev && <button onClick={(e) => { e.stopPropagation(); goPrev(); }} title="上一张 (←)"><IconChevronLeft size={14} /></button>}
+            {hasNext && <button onClick={(e) => { e.stopPropagation(); goNext(); }} title="下一张 (→)"><IconChevronRight size={14} /></button>}
+            <button onClick={(e) => { e.stopPropagation(); api.revealInFolder(path); }} title="在文件管理器中显示"><IconFolderOpen size={13} /></button>
+            <button className="image-preview-close" onClick={onClose} title="关闭 (Esc)"><IconClose size={14} /></button>
           </div>
         </div>
 
@@ -193,7 +197,12 @@ export function ImagePreview({ path, siblings, onClose, onNavigate }: ImagePrevi
           onPointerCancel={onPointerUp}
           onClick={e => e.stopPropagation()}
         >
-          {!loaded && !err && <div className="image-preview-loading">加载中…</div>}
+          {!loaded && !err && (
+            <div className="image-preview-loading">
+              <span className="spinner" />
+              加载中…
+            </div>
+          )}
           {err && <div className="image-preview-err">{err}</div>}
           <img
             ref={imgRef}

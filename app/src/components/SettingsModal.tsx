@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, DuplicatesResponse } from "../api";
+import { IconSearch, IconClose, IconSettings } from "../icons";
 
 function fmtSize(n: number): string {
   if (!n || n <= 0) return "";
@@ -42,7 +43,8 @@ export function DuplicatesPanel() {
             title="调低会找出更多「长得像」的图，调高只找几乎一致的"
           />
           <button className="btn-sm" onClick={run} disabled={loading}>
-            {loading ? "检测中…" : "🔍 查找重复"}
+            {loading ? <span className="spinner" style={{ width: 11, height: 11 }} /> : <IconSearch size={12} />}
+            {loading ? "检测中…" : "查找重复"}
           </button>
         </div>
       </div>
@@ -103,8 +105,9 @@ export function SettingsModal({ onClose, children }: { onClose: () => void; chil
     >
       <div className="settings-window">
         <div className="settings-header">
+          <IconSettings size={14} />
           <span>设置</span>
-          <button className="settings-close" onClick={onClose} title="关闭 (Esc)">✕</button>
+          <button className="settings-close" onClick={onClose} title="关闭 (Esc)"><IconClose size={13} /></button>
         </div>
         <div className="settings-body">
           {children}

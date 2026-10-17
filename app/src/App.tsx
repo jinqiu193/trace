@@ -6,6 +6,8 @@ import { Filters } from "./components/Filters";
 import { VideoPreview } from "./components/VideoPreview";
 import { ImagePreview } from "./components/ImagePreview";
 import { SettingsModal } from "./components/SettingsModal";
+import { ShortcutHelp } from "./components/ShortcutHelp";
+import { IconSearch, IconSettings, IconKeyboard } from "./icons";
 import type { VideoHit } from "./api";
 
 export default function App() {
@@ -16,6 +18,7 @@ export default function App() {
   const [resultCount, setResultCount] = useState(0);
   const [facets, setFacets] = useState<Record<string, number>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [videoPreview, setVideoPreview] = useState<{ path: string; location: string; hits?: VideoHit[] } | null>(null);
   const [imagePreview, setImagePreview] = useState<{
     path: string;
@@ -25,10 +28,26 @@ export default function App() {
   return (
     <div className="app">
       <header className="menubar">
+        <span className="menubar-logo"><IconSearch size={12} /></span>
         <span className="menubar-title">Trace</span>
         <span className="menubar-sub">本地文件夹语义检索</span>
         <span className="menubar-spacer" />
-        <button className="menubar-btn" onClick={() => setSettingsOpen(true)}>⚙ 设置</button>
+        <button
+          className="menubar-btn"
+          onClick={() => setHelpOpen(true)}
+          title="键盘快捷键 (?)"
+        >
+          <IconKeyboard size={14} />
+          快捷键
+        </button>
+        <button
+          className="menubar-btn"
+          onClick={() => setSettingsOpen(true)}
+          title="设置"
+        >
+          <IconSettings size={14} />
+          设置
+        </button>
       </header>
       <aside className="sidebar">
         <Filters
@@ -51,9 +70,11 @@ export default function App() {
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
           onResultCount={setResultCount}
           onFacets={setFacets}
+          onShowHelp={() => setHelpOpen(true)}
         />
       </main>
       <StatusBar tick={statusTick} />
+      {helpOpen && <ShortcutHelp onClose={() => setHelpOpen(false)} />}
       {settingsOpen && (
         <SettingsModal onClose={() => setSettingsOpen(false)}>
           <RootManager onChanged={() => setStatusTick(t => t + 1)} />

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, VideoHit } from "../api";
+import { IconClose } from "../icons";
 
 export interface VideoPreviewProps {
   path: string;
@@ -142,7 +143,7 @@ export function VideoPreview({ path, location, hits, onClose }: VideoPreviewProp
           <span className="video-preview-loc">@{location}（{targetSec}s）</span>
           <span className="video-preview-name">{path.split(/[\\/]/).pop()}</span>
           {mode === "frames" && <span className="video-preview-mode-tag">帧回退</span>}
-          <button className="video-preview-close" onClick={onClose} title="关闭（Esc）">✕</button>
+          <button className="video-preview-close" onClick={onClose} title="关闭（Esc）"><IconClose size={14} /></button>
         </div>
         <div className="vb-layout">
           <div className="vb-main">

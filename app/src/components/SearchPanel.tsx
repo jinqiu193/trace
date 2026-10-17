@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, SearchResult, SortKey, VideoHit } from "../api";
+import {
+  IconSearch, IconImage, IconClose, IconSimilar, IconList, IconGrid,
+  IconClock, IconCopy, IconDownload, IconSparkle, IconUpload, IconKeyboard, IconCheck,
+} from "../icons";
 
 const FILE_TYPE_COLORS: Record<string, string> = {
-  image: "#e879f9",
-  pdf: "#f97316",
-  text: "#22d3ee",
+  image: "#c084fc",
+  pdf: "#fb923c",
+  text: "#67e8f9",
   code: "#a3e635",
   audio: "#fbbf24",
-  video: "#f43f5e",
+  video: "#fb7185",
+};
+
+const TYPE_LABELS: Record<string, string> = {
+  image: "图片", pdf: "PDF", text: "文本", code: "代码", audio: "音频", video: "视频",
 };
 
 const SORTS: { key: SortKey; label: string }[] = [
@@ -62,6 +70,12 @@ function tsOf(loc?: string): number {
   return parts.reduce((a, p) => a * 60 + p, 0);
 }
 
+/** 是否有全屏弹层打开（Esc 应交给它们处理） */
+function overlayOpen(): boolean {
+  return !!document.querySelector(
+    ".settings-overlay, .video-preview-overlay, .image-preview-overlay, .help-overlay");
+}
+
 export interface ImageSibling {
   path: string;
   name: string;
@@ -75,9 +89,10 @@ export interface SearchPanelProps {
   onPreviewImage?: (path: string, siblings: ImageSibling[]) => void;
   onResultCount?: (n: number) => void;
   onFacets?: (f: Record<string, number>) => void;
+  onShowHelp?: () => void;
 }
 
-export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewImage, onResultCount, onFacets }: SearchPanelProps = {}) {
+export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewImage, onResultCount, onFacets, onShowHelp }: SearchPanelProps = {}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -89,8 +104,11 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   const [history, setHistory] = useState<string[]>(loadHistory);
   const [showHistory, setShowHistory] = useState(false);
   const [histSel, setHistSel] = useState(-1);
+  const [toast, setToast] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const selRef = useRef<HTMLDivElement | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // 以图搜图状态
   const [imgFile, setImgFile] = useState<File | null>(null);
@@ -111,6 +129,17 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   useEffect(() => { onResultCount?.(results.length); }, [results]);
 
   useEffect(() => { onFacets?.(facets); }, [facets]);
+
+  // 键盘选中项滚动跟随（在视口边缘时平滑滚入）
+  useEffect(() => {
+    selRef.current?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 1800);
+  }, []);
 
   // 视频命中 + 有 location → 走内嵌 HTML5 预览（跳到那一秒）
   // 图片 → 走内嵌图片预览（带翻页）；其他 → 系统默认应用
@@ -316,23 +345,66 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h)); } catch { /* noop */ }
   };
 
-  // 键盘导航（FR-6: ↑↓ Enter）：
-  // - 主输入框：↑↓ 导航历史下拉（展开时）或结果；Enter 打开
-  // - 其他输入框（如目录过滤）：不拦截（用户在编辑文本）
-  // - 非输入焦点（点击了结果区/空白处）：↑↓ Enter 仍可导航结果
+  // Esc 分层退出：历史下拉 → 查询文字 → 图片模式 → 相似模式
+  const escapeBack = useCallback(() => {
+    if (showHistory) { setShowHistory(false); setHistSel(-1); return true; }
+    if (query) { setQuery(""); return true; }
+    if (imgFile) { clearImage(); return true; }
+    if (similarFrom) { clearSimilar(); return true; }
+    return false;
+  }, [showHistory, query, imgFile, similarFrom, clearImage, clearSimilar]);
+
+  // 键盘导航 + 全局快捷键：
+  // - ↑↓ 导航（历史下拉展开时优先历史，否则结果），Enter 打开
+  // - Ctrl+K / `/` 聚焦搜索框（任意位置）
+  // - Esc 分层退出（弹层打开时交给弹层）
+  // - Ctrl+G 切换列表/网格；`?` 打开快捷键帮助
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const inField = !!target && (
         target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable
       );
+
+      // Ctrl+K：任意位置聚焦搜索框
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+        return;
+      }
+      // Ctrl+G：切换视图
+      if ((e.ctrlKey || e.metaKey) && (e.key === "g" || e.key === "G")) {
+        e.preventDefault();
+        setView(v => v === "list" ? "grid" : "list");
+        return;
+      }
+      // `?` 打开帮助（非输入态）
+      if (e.key === "?" && !inField) {
+        e.preventDefault();
+        onShowHelp?.();
+        return;
+      }
+      // `/` 聚焦搜索框（非输入态）
+      if (e.key === "/" && !inField) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        return;
+      }
+
+      // 以下仅搜索框自身或非输入焦点时生效
       if (inField && target !== inputRef.current) return;
+
+      if (e.key === "Escape") {
+        if (overlayOpen()) return;   // 弹层的 Esc 由弹层自己处理
+        if (escapeBack()) e.preventDefault();
+        return;
+      }
 
       if (showHistory && e.target === inputRef.current && history.length > 0) {
         if (e.key === "ArrowDown") { e.preventDefault(); setHistSel(h => Math.min(h + 1, history.length - 1)); return; }
         if (e.key === "ArrowUp") { e.preventDefault(); setHistSel(h => Math.max(h - 1, 0)); return; }
         if (e.key === "Enter" && histSel >= 0) { e.preventDefault(); applyHistory(history[histSel]); return; }
-        if (e.key === "Escape") { setShowHistory(false); setHistSel(-1); return; }
       }
       if (e.key === "ArrowDown") {
         e.preventDefault(); setShowHistory(false);
@@ -343,20 +415,20 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
       } else if (e.key === "Enter" && results[selected]) {
         e.preventDefault();
         handleOpen(results[selected]);
-      } else if (e.key === "Escape") {
-        setShowHistory(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [results, selected, showHistory, history, histSel]);
+  }, [results, selected, showHistory, history, histSel, escapeBack, onShowHelp]);
 
   // ---- 导出 ----
   const copyPaths = async () => {
     try {
       await navigator.clipboard.writeText(results.map(r => r.path).join("\n"));
+      showToast(`已复制 ${results.length} 条路径`);
     } catch (e) {
       console.error(e);
+      showToast("复制失败");
     }
   };
   const exportCSV = () => {
@@ -373,6 +445,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
     a.download = `trace_results_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
+    showToast("CSV 已导出");
   };
 
   const active = !!imgFile || !!similarFrom || !!query.trim();
@@ -398,7 +471,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   return (
     <div className="search-panel">
       <div className="search-box">
-        <span className="search-icon">🔍</span>
+        <span className="search-icon"><IconSearch size={16} /></span>
         <input
           ref={inputRef}
           value={query}
@@ -416,17 +489,24 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
           spellCheck={false}
           autoComplete="off"
         />
+        {query && (
+          <button className="clear-btn" onClick={() => { setQuery(""); inputRef.current?.focus(); }} title="清空搜索 (Esc)">
+            <IconClose size={13} />
+          </button>
+        )}
         {imgUrl && (
           <img className="query-thumb" src={imgUrl} alt="" title={imgFile?.name} />
         )}
         {imgUrl && (
-          <button className="query-thumb-clear" onClick={clearImage} title="退出以图搜图">✕</button>
+          <button className="icon-btn" onClick={clearImage} title="退出以图搜图">
+            <IconClose size={13} />
+          </button>
         )}
         <button
           className="img-pick-btn"
           onClick={() => fileInputRef.current?.click()}
           title="以图搜图：选择图片（也可直接拖拽图片到窗口，或 Ctrl+V 粘贴）"
-        >📷</button>
+        ><IconImage size={15} /></button>
         <input
           ref={fileInputRef}
           type="file"
@@ -438,8 +518,11 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
             e.target.value = "";
           }}
         />
-        {loading && <span className="search-loading">{imgFile ? "分析中…" : "…"}</span>}
-        {ms !== null && <span className="search-ms">{ms.toFixed(0)}ms · {results.length} 条</span>}
+        {loading && <span className="search-loading"><span className="spinner" /></span>}
+        {ms !== null && !loading && <span className="search-ms">{ms.toFixed(0)}ms · {results.length} 条</span>}
+        {!active && (
+          <span className="search-ms" title="快捷键"><kbd className="kbd">Ctrl K</kbd></span>
+        )}
       </div>
 
       {showHistory && query.trim() === "" && !imgFile && history.length > 0 && (
@@ -459,6 +542,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
               onMouseLeave={() => setHistSel(-1)}
               onMouseDown={(e) => { e.preventDefault(); applyHistory(h); }}
             >
+              <IconClock size={13} />
               <span className="search-history-text">{h}</span>
               <button
                 className="search-history-del"
@@ -476,17 +560,50 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
         <div className="fuzzy-note">未找到精确关键词命中，以下为模糊匹配结果（可能存在拼写偏差）</div>
       )}
 
+      {/* 初始欢迎态 */}
+      {!active && !loading && (
+        <div className="welcome">
+          <div className="welcome-logo"><IconSearch size={26} /></div>
+          <div className="welcome-title">语义搜索本地文件</div>
+          <div className="welcome-sub">
+            文字描述、示例图片、甚至视频里的某句话——都能找到<br />
+            中英文混合、拼写偏差也没关系
+          </div>
+          <div className="welcome-cards">
+            <div className="welcome-card">
+              <span className="welcome-card-icon"><IconSearch size={15} /></span>
+              <span className="welcome-card-title">自然语言查询</span>
+              <span className="welcome-card-sub">直接描述要找的内容，按语义而不只是文件名匹配</span>
+            </div>
+            <div className="welcome-card">
+              <span className="welcome-card-icon"><IconUpload size={15} /></span>
+              <span className="welcome-card-title">以图搜图</span>
+              <span className="welcome-card-sub">把图片拖进窗口或 <kbd className="kbd">Ctrl V</kbd> 粘贴，还能补一句文字精修结果</span>
+            </div>
+            <div className="welcome-card">
+              <span className="welcome-card-icon"><IconKeyboard size={15} /></span>
+              <span className="welcome-card-title">键盘优先</span>
+              <span className="welcome-card-sub"><kbd className="kbd">Ctrl K</kbd> 聚焦 · <kbd className="kbd">↑↓</kbd> 选择 · <kbd className="kbd">Enter</kbd> 打开 · <kbd className="kbd">?</kbd> 全部快捷键</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {active && (
         <div className="search-toolbar">
           {imgFile && (
             <span className="img-mode-tag">
-              🖼 {query.trim() ? "图+文联合搜索" : "以图搜图 · 按相似度浏览"}
+              <IconImage size={12} />
+              {query.trim() ? "图+文联合搜索" : "以图搜图 · 按相似度浏览"}
             </span>
           )}
           {similarFrom && (
-            <span className="img-mode-tag similar-tag" title={`切片 #${similarFrom.sid}`}>
-              ⤳ 相似：{similarFrom.name}
-              <button className="similar-clear" onClick={clearSimilar} title="退出相似搜索">✕</button>
+            <span className="img-mode-tag" title={`切片 #${similarFrom.sid}`}>
+              <IconSimilar size={12} />
+              相似：{similarFrom.name}
+              <button className="search-history-del" onClick={clearSimilar} title="退出相似搜索 (Esc)">
+                <IconClose size={11} />
+              </button>
             </span>
           )}
           <span className="toolbar-spacer" />
@@ -497,20 +614,20 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
           <button
             className={"view-btn" + (view === "list" ? " active" : "")}
             onClick={() => setView("list")}
-            title="列表视图"
-          >☰</button>
+            title="列表视图 (Ctrl G)"
+          ><IconList size={14} /></button>
           <button
             className={"view-btn" + (view === "grid" ? " active" : "")}
             onClick={() => setView("grid")}
-            title="网格视图（适合浏览图片/视频）"
-          >▦</button>
+            title="网格视图（适合浏览图片/视频）(Ctrl G)"
+          ><IconGrid size={14} /></button>
         </div>
       )}
 
       {results.length > 0 && (
         <div className="search-actions">
-          <button className="btn-xs" onClick={copyPaths}>复制路径</button>
-          <button className="btn-xs" onClick={exportCSV}>导出 CSV</button>
+          <button className="btn-xs" onClick={copyPaths}><IconCopy size={12} /> 复制路径</button>
+          <button className="btn-xs" onClick={exportCSV}><IconDownload size={12} /> 导出 CSV</button>
         </div>
       )}
 
@@ -521,8 +638,24 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
               ? "没有找到相似内容。试试换一张图，或清除类型/目录过滤。"
               : similarFrom
                 ? "没有找到相似内容。"
-                : "没有命中。试试换个说法，或在右上角「⚙ 设置」里添加更多文件夹。"}
+                : "没有命中。试试换个说法，或在右上角「设置」里添加更多文件夹。"}
           </div>
+        )}
+
+        {/* 加载骨架屏：首次查询无结果可展示时 */}
+        {loading && results.length === 0 && active && (
+          <>
+            {[0, 1, 2, 3, 4].map(i => (
+              <div key={i} className="skeleton-card">
+                <div className="skeleton-thumb" />
+                <div className="skeleton-lines">
+                  <div className="skeleton-line w-60" />
+                  <div className="skeleton-line w-80" />
+                  <div className="skeleton-line w-40" />
+                </div>
+              </div>
+            ))}
+          </>
         )}
 
         {view === "grid" && results.length > 0 && (
@@ -530,6 +663,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
             {results.map((r, i) => (
               <div
                 key={r.path + i}
+                ref={i === selected ? selRef : undefined}
                 className={"grid-card" + (i === selected ? " selected" : "") + (r.strong ? "" : " weak")}
                 onClick={() => handleOpen(r)}
                 onDoubleClick={() => api.revealInFolder(r.path)}
@@ -546,7 +680,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
                   {fmtDate(r.mtime) && <span>{fmtDate(r.mtime)}</span>}
                   {r.sid != null && (
                     <button className="mlt-btn" title="搜索与此相似的内容"
-                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}>⤳</button>
+                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}><IconSimilar size={11} /></button>
                   )}
                 </div>
               </div>
@@ -557,6 +691,7 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
         {view === "list" && results.map((r, i) => (
           <div
             key={r.path + i}
+            ref={i === selected ? selRef : undefined}
             className={"result" + (i === selected ? " selected" : "") + (r.strong ? "" : " weak")}
             onClick={() => handleOpen(r)}
             onDoubleClick={() => api.revealInFolder(r.path)}
@@ -575,16 +710,21 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
               <div className="result-content">
                 <div className="result-row1">
                   <span className="result-type" style={{ background: FILE_TYPE_COLORS[r.file_type] ?? "#64748b" }}>
-                    {r.file_type}
+                    {TYPE_LABELS[r.file_type] ?? r.file_type}
                   </span>
                   <span className="result-name">{r.name}</span>
                   {r.location && <span className="result-loc">@{r.location}</span>}
-                  <span className="result-score">score {r.score.toFixed(3)}</span>
+                  <span className="score-bar" title={`综合分 ${r.score.toFixed(3)}`}>
+                    <i style={{ width: `${Math.max(0, Math.min(1, r.score)) * 100}%` }} />
+                  </span>
+                  <span className="result-score">{r.score.toFixed(3)}</span>
                   {r.confidence === "low" && <span className="confidence-low">⚠ 低置信</span>}
                   {r.confidence === "medium" && <span className="confidence-med">中置信</span>}
                   {r.sid != null && (
                     <button className="mlt-btn" title="搜索与此相似的内容"
-                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}>⤳ 相似</button>
+                      onClick={(e) => { e.stopPropagation(); startSimilar(r.sid!, r.name); }}>
+                      <IconSimilar size={11} /> 相似
+                    </button>
                   )}
                 </div>
                 <div className="result-row2">
@@ -626,7 +766,17 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
 
       {dragOver && (
         <div className="drop-overlay">
-          <div className="drop-overlay-card">📥 松手用这张图片搜索</div>
+          <div className="drop-overlay-card">
+            <IconSparkle size={18} />
+            松手用这张图片搜索
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className="toast">
+          <IconCheck size={14} />
+          {toast}
         </div>
       )}
     </div>
