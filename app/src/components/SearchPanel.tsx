@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { api, SearchResult, SortKey, SearchMode, VideoHit } from "../api";
 import {
-  IconSearch, IconImage, IconClose, IconSimilar, IconList, IconGrid,
+  IconSearch, IconImage, IconClose, IconSimilar,
   IconClock, IconCopy, IconDownload, IconSparkle, IconUpload, IconKeyboard, IconCheck,
 } from "../icons";
 
@@ -20,13 +20,6 @@ const TYPE_LABELS: Record<string, string> = {
 
 const FILTER_TYPES = ["text", "pdf", "image", "code", "audio", "video"] as const;
 
-const SORTS: { key: SortKey; label: string }[] = [
-  { key: "relevance", label: "相关度" },
-  { key: "mtime_desc", label: "时间 新→旧" },
-  { key: "mtime_asc", label: "时间 旧→新" },
-  { key: "size_desc", label: "大小 大→小" },
-  { key: "name", label: "文件名 A→Z" },
-];
 
 const DATE_RANGES: { key: string; label: string }[] = [
   { key: "", label: "任意时间" },
@@ -116,6 +109,11 @@ export interface SearchPanelProps {
   onShowHelp?: () => void;
   /** 索引根目录变更信号（设置里增删目录后 +1），用于刷新位置下拉 */
   rootsTick?: number;
+  /** 检索模式 / 排序 / 视图（控件在标题栏，状态由 App 持有） */
+  mode: SearchMode;
+  sort: SortKey;
+  view: "list" | "grid";
+  onViewChange: (v: "list" | "grid") => void;
 }
 
 /** 路径显示短名：取最后一段（D:\photos → photos；D:\ → D:\） */
@@ -125,7 +123,8 @@ function pathShortName(p: string): string {
   return seg.length ? seg[seg.length - 1] : p;
 }
 
-export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp, rootsTick = 0 }: SearchPanelProps = {}) {
+export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp, rootsTick = 0,
+  mode, sort, view, onViewChange }: SearchPanelProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -149,13 +148,6 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // 相似度门槛（z 分）：默认 0 显示全部候选；调大只保留与查询更相似的结果
   const [threshold, setThreshold] = useState(0);
   const [dateRange, setDateRange] = useState("");    // "" / today / week / month / year
-  // 检索模式：详细（全切片+命中详情）/ 简单（视频每文件 2 代表片段，更快）
-  const [mode, setMode] = useState<SearchMode>(() =>
-    (localStorage.getItem("trace.mode") as SearchMode) === "fast" ? "fast" : "detailed");
-  const switchMode = (m: SearchMode) => {
-    setMode(m);
-    localStorage.setItem("trace.mode", m);
-  };
 
   // 以图搜图状态
   const [imgFile, setImgFile] = useState<File | null>(null);
@@ -165,9 +157,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // More like this：以某切片向量搜相似（全模态）
   const [similarFrom, setSimilarFrom] = useState<{ sid: number; name: string } | null>(null);
 
-  // 排序 / 视图 / facets
-  const [sort, setSort] = useState<SortKey>("relevance");
-  const [view, setView] = useState<"list" | "grid">("list");
+  // facets
   const [facets, setFacets] = useState<Record<string, number>>({});
   const [dragOver, setDragOver] = useState(false);
   // 索引根目录列表（位置下拉）
@@ -441,7 +431,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
       // Ctrl+G：切换视图
       if ((e.ctrlKey || e.metaKey) && (e.key === "g" || e.key === "G")) {
         e.preventDefault();
-        setView(v => v === "list" ? "grid" : "list");
+        onViewChange(view === "list" ? "grid" : "list");
         return;
       }
       // `?` 打开帮助（非输入态）
@@ -632,7 +622,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
       {/* 初始欢迎态 */}
       {!active && !loading && (
         <div className="welcome">
-          <div className="welcome-logo"><IconSearch size={26} /></div>
+
           <div className="welcome-title">语义搜索本地文件</div>
           <div className="welcome-sub">
             文字描述、示例图片、甚至视频里的某句话——都能找到<br />
@@ -739,35 +729,9 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
               title="清除全部筛选条件"
             >✕ 重置</button>
           )}
-          <span className="toolbar-spacer" />
-          <div className="mode-seg" role="group" aria-label="检索模式">
-            <button
-              className={"mode-seg-btn" + (mode === "fast" ? " active" : "")}
-              onClick={() => switchMode("fast")}
-              title="简单：视频每个文件仅比对 2 个代表片段，跳过命中详情组装，速度更快"
-            >⚡ 简单</button>
-            <button
-              className={"mode-seg-btn" + (mode === "detailed" ? " active" : "")}
-              onClick={() => switchMode("detailed")}
-              title="详细：全片段比对 + 时间轴命中标记 + 周边帧，结果最全（默认）"
-            >详细</button>
-          </div>
-          <label className="sort-label">排序</label>
-          <select className="sort-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-            {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-          </select>
-          <button
-            className={"view-btn" + (view === "list" ? " active" : "")}
-            onClick={() => setView("list")}
-            title="列表视图 (Ctrl G)"
-          ><IconList size={14} /></button>
-          <button
-            className={"view-btn" + (view === "grid" ? " active" : "")}
-            onClick={() => setView("grid")}
-            title="网格视图（适合浏览图片/视频）(Ctrl G)"
-          ><IconGrid size={14} /></button>
         </div>
       )}
+
 
       {results.length > 0 && (
         <div className="search-actions">

@@ -7,8 +7,16 @@ import { ImagePreview } from "./components/ImagePreview";
 import { FilePreview } from "./components/FilePreview";
 import { SettingsModal } from "./components/SettingsModal";
 import { ShortcutHelp } from "./components/ShortcutHelp";
-import { IconSearch, IconSettings, IconKeyboard } from "./icons";
-import type { VideoHit } from "./api";
+import { IconSearch, IconSettings, IconKeyboard, IconList, IconGrid } from "./icons";
+import type { VideoHit, SearchMode, SortKey } from "./api";
+
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: "relevance", label: "相关度" },
+  { key: "mtime_desc", label: "时间 新→旧" },
+  { key: "mtime_asc", label: "时间 旧→新" },
+  { key: "size_desc", label: "大小 大→小" },
+  { key: "name", label: "文件名 A→Z" },
+];
 
 export default function App() {
   const [statusTick, setStatusTick] = useState(0);
@@ -26,20 +34,54 @@ export default function App() {
     query?: string;
   } | null>(null);
 
+  // 检索模式 / 排序 / 视图（控件在标题栏，状态提升到此）
+  const [mode, setMode] = useState<SearchMode>(() =>
+    (localStorage.getItem("trace.mode") as SearchMode) === "fast" ? "fast" : "detailed");
+  const switchMode = (m: SearchMode) => {
+    setMode(m);
+    localStorage.setItem("trace.mode", m);
+  };
+  const [sort, setSort] = useState<SortKey>("relevance");
+  const [view, setView] = useState<"list" | "grid">("list");
+
   return (
     <div className="app">
       <header className="menubar">
         <span className="menubar-logo"><IconSearch size={12} /></span>
         <span className="menubar-title">Trace</span>
-        <span className="menubar-sub">本地文件夹语义检索</span>
         <span className="menubar-spacer" />
+        <div className="mode-seg" role="group" aria-label="检索模式">
+          <button
+            className={"mode-seg-btn" + (mode === "fast" ? " active" : "")}
+            onClick={() => switchMode("fast")}
+            title="简单：视频每个文件仅比对 2 个代表片段，跳过命中详情组装，速度更快"
+          >⚡ 简单</button>
+          <button
+            className={"mode-seg-btn" + (mode === "detailed" ? " active" : "")}
+            onClick={() => switchMode("detailed")}
+            title="详细：全切片比对 + 时间轴命中标记 + 周边帧，结果最全（默认）"
+          >详细</button>
+        </div>
+        <select className="sort-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)} title="结果排序">
+          {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
+        <button
+          className={"view-btn" + (view === "list" ? " active" : "")}
+          onClick={() => setView("list")}
+          title="列表视图 (Ctrl G)"
+        ><IconList size={14} /></button>
+        <button
+          className={"view-btn" + (view === "grid" ? " active" : "")}
+          onClick={() => setView("grid")}
+          title="网格视图（适合浏览图片/视频）(Ctrl G)"
+        ><IconGrid size={14} /></button>
+        <span className="menubar-sep" />
         <button
           className="menubar-btn"
           onClick={() => setHelpOpen(true)}
           title="键盘快捷键 (?)"
         >
           <IconKeyboard size={14} />
-          快捷键
         </button>
         <button
           className="menubar-btn"
@@ -47,7 +89,6 @@ export default function App() {
           title="设置"
         >
           <IconSettings size={14} />
-          设置
         </button>
       </header>
       <main className="main">
@@ -57,6 +98,10 @@ export default function App() {
           onPreviewFile={(path, file_type, location, query) => setFilePreview({ path, file_type, location, query })}
           onShowHelp={() => setHelpOpen(true)}
           rootsTick={statusTick}
+          mode={mode}
+          sort={sort}
+          view={view}
+          onViewChange={setView}
         />
       </main>
       <StatusBar tick={statusTick} />
