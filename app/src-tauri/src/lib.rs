@@ -1,12 +1,15 @@
 // Trace 桌面端（Tauri 2）：启动 Python 边车，暴露 backend URL 给前端。
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{Manager, RunEvent};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 /// 持有 Python 边车的端口号和子进程句柄。
 struct BackendState {
@@ -157,13 +160,18 @@ pub fn run() {
 
     // 启动 Python 边车：跑根目录的 webserver.py（不用 -m 避免 stdlib `trace` 撞名）
     let proj = project_root();
-    let mut child = match Command::new(find_python())
+    // GUI 子系统下 spawn console 程序（python.exe）必须 CREATE_NO_WINDOW，否则弹控制台
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut sidecar_cmd = Command::new(find_python());
+    sidecar_cmd
         .args(["webserver.py", "--port", "0"])
         .current_dir(&proj)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    sidecar_cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut child = match sidecar_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[trace] failed to spawn sidecar: {}", e);
@@ -171,10 +179,21 @@ pub fn run() {
         }
     };
 
+    // GUI 子系统没有 stderr 可看：sidecar 日志统一落 sidecar.log（追加）
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(proj.join("sidecar.log"))
+        .ok();
+
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() { eprintln!("[sidecar] {}", line); }
+            for line in reader.lines().flatten() {
+                if let Some(f) = log_file.as_mut() {
+                    let _ = writeln!(f, "[sidecar] {}", line);
+                }
+            }
         });
     }
 

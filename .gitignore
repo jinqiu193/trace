@@ -44,3 +44,4 @@ tools/
 Thumbs.db
 .DS_Store
 dev_restart.bat
+sidecar.log
