@@ -36,19 +36,6 @@ const DATE_RANGES: { key: string; label: string }[] = [
   { key: "year", label: "近一年" },
 ];
 
-const SIZE_RANGES: { key: string; label: string }[] = [
-  { key: "", label: "任意大小" },
-  { key: "lt10", label: "< 10MB" },
-  { key: "10-100", label: "10MB – 100MB" },
-  { key: "100-1024", label: "100MB – 1GB" },
-  { key: "gt1024", label: "> 1GB" },
-];
-
-const MB = 1024 * 1024;
-
-/** 相似度门槛默认值，与后端 Z_GATE 一致 */
-const DEFAULT_Z_GATE = 2.0;
-
 function dateRangeToAfter(r: string): number | undefined {
   const now = Date.now() / 1000;
   if (r === "today") return now - 86400;
@@ -56,16 +43,6 @@ function dateRangeToAfter(r: string): number | undefined {
   if (r === "month") return now - 30 * 86400;
   if (r === "year") return now - 365 * 86400;
   return undefined;
-}
-
-function sizeRangeToPair(r: string): { min?: number; max?: number } {
-  switch (r) {
-    case "lt10": return { max: 10 * MB };
-    case "10-100": return { min: 10 * MB, max: 100 * MB };
-    case "100-1024": return { min: 100 * MB, max: 1024 * MB };
-    case "gt1024": return { min: 1024 * MB };
-    default: return {};
-  }
 }
 
 /** 后端 snippet 的命中词包在 «» 中，渲染成 <mark> */
@@ -169,10 +146,9 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // 筛选（工具栏内联，与排序同级）
   const [fileType, setFileType] = useState("");
   const [dir, setDir] = useState("");
-  // 相似度门槛（z 分）：越大越严，只保留与查询越相似的结果；0 = 不过滤
-  const [threshold, setThreshold] = useState(DEFAULT_Z_GATE);
+  // 相似度门槛（z 分）：默认 0 显示全部候选；调大只保留与查询更相似的结果
+  const [threshold, setThreshold] = useState(0);
   const [dateRange, setDateRange] = useState("");    // "" / today / week / month / year
-  const [sizeRange, setSizeRange] = useState("");    // "" / lt10 / 10-100 / 100-1024 / gt1024
   // 检索模式：详细（全切片+命中详情）/ 简单（视频每文件 2 代表片段，更快）
   const [mode, setMode] = useState<SearchMode>(() =>
     (localStorage.getItem("trace.mode") as SearchMode) === "fast" ? "fast" : "detailed");
@@ -390,7 +366,6 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
     const t = setTimeout(async () => {
       setLoading(true); setError(null);
       try {
-        const sz = sizeRangeToPair(sizeRange);
         const r = await api.search(query, {
           limit,
           sort,
@@ -398,8 +373,6 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           dir: dir || undefined,
           threshold,
           mtime_after: dateRangeToAfter(dateRange),
-          min_size: sz.min,
-          max_size: sz.max,
           mode,
         });
         setResults(r.results);
@@ -414,7 +387,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
       }
     }, 150);
     return () => clearTimeout(t);
-  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, sizeRange, mode, limit, sort]);
+  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, mode, limit, sort]);
 
   // 历史记录：查询稳定 2s 后写入（避免打字中间态全部入史）
   useEffect(() => {
@@ -544,8 +517,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // name: 前缀 → 文件名精确搜索模式（Everything 风格）
   const isNameMode = !imgFile && !similarFrom
     && query.trim().toLowerCase().startsWith("name:") && query.trim().length > 5;
-  const hasFilters = fileType !== "" || dir !== "" || threshold !== DEFAULT_Z_GATE
-    || dateRange !== "" || sizeRange !== "";
+  const hasFilters = fileType !== "" || dir !== "" || threshold > 0 || dateRange !== "";
 
   const renderThumb = (r: SearchResult, maxW: number) => {
     if (r.file_type === "image") {
@@ -743,18 +715,10 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           >
             {DATE_RANGES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
           </select>
-          <select
-            className={"range-select" + (sizeRange ? " active" : "")}
-            value={sizeRange}
-            onChange={(e) => setSizeRange(e.target.value)}
-            title="按文件大小过滤"
-          >
-            {SIZE_RANGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-          </select>
           {!(imgFile || similarFrom || isNameMode) && (
             <div
               className="thr-wrap"
-              title="相似度门槛（z 分）：值越大越严格，只保留与查询越相似的结果；拉到 0 显示全部候选"
+              title="相似度门槛（z 分）：默认 0 显示全部候选；值越大越严格，只保留与查询越相似的结果"
             >
               <span className="thr-label">相似 ≥</span>
               <input
@@ -771,7 +735,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           {hasFilters && (
             <button
               className="filters-reset"
-              onClick={() => { setFileType(""); setDir(""); setThreshold(DEFAULT_Z_GATE); setDateRange(""); setSizeRange(""); }}
+              onClick={() => { setFileType(""); setDir(""); setThreshold(0); setDateRange(""); }}
               title="清除全部筛选条件"
             >✕ 重置</button>
           )}
