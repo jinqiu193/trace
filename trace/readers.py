@@ -206,23 +206,131 @@ def _is_same_shot(curr: tuple[int, float], prev: tuple[int, float],
     return True
 
 
+def _video_pil(arr, max_pixel: int):
+    """BGR ndarray → 缩放到 max_pixel 长边的 RGB PIL.Image。"""
+    import cv2
+    from PIL import Image
+    h0, w0 = arr.shape[:2]
+    if max(h0, w0) > max_pixel:
+        scale = max_pixel / max(h0, w0)
+        arr = cv2.resize(arr, (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                         interpolation=cv2.INTER_AREA)
+    return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
+
+
+def _open_video_threaded(path):
+    """打开视频 + 流多线程，返回 (container, video_stream)。"""
+    import av
+    container = av.open(str(path))
+    v_stream = next((s for s in container.streams if s.type == "video"), None)
+    if v_stream is None:
+        container.close()
+        return None, None
+    try:
+        v_stream.codec_context.thread_count = 0  # auto
+        v_stream.codec_context.thread_type = "AUTO"
+    except Exception:
+        pass
+    return container, v_stream
+
+
+def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
+                             ahash_tolerance: int, max_frames: int) -> Iterator[dict]:
+    """场景模式抽帧：只解关键帧（skip_frame=NONKEY）+ aHash 场景检测 + 超上限等距抽稀。
+
+    用户口径（2026-10-17）：覆盖视频大部分场景即可，静止/缓变画面忽略，
+    几小时视频抽 ~N 个代表镜头用于检索。两遍法恒定内存：
+    第一遍只算 aHash 不留像素，定下保留帧时间点；
+    第二遍同参数再解一遍，命中帧缩放 512px 产出。
+    实测 65min 视频：501 关键帧 / 每遍 ~9s（vs tick 模式 seek 抽帧 87s+335 帧嵌入）。
+    """
+    import av
+    limit = max(1, min(max_frames, config.VIDEO_SCENE_MAX_SLICES))
+
+    # ---- 第一遍：关键帧 aHash，找出场景边界帧 ----
+    sigs: list[tuple[int, float]] = []
+    tss: list[float] = []
+    container, v_stream = _open_video_threaded(path)
+    if v_stream is None:
+        return
+    try:
+        v_stream.codec_context.skip_frame = "NONKEY"  # 丢弃全部 P/B 帧
+        for f in container.decode(v_stream):
+            sigs.append(_frame_signature(f.to_ndarray(format="bgr24"),
+                                         side=config.VIDEO_AHASH_SIDE))
+            tss.append(f.time or 0.0)
+    finally:
+        container.close()
+    if not sigs:
+        return
+
+    scene_idx: list[int] = []
+    last_sig = None
+    for i, s in enumerate(sigs):
+        if last_sig is not None and _is_same_shot(s, last_sig, ahash_tolerance):
+            continue
+        last_sig = s
+        scene_idx.append(i)
+
+    # 场景帧数超上限 → 等距抽稀（保首尾）
+    if len(scene_idx) > limit:
+        n = len(scene_idx)
+        picked = sorted({int(round(k * (n - 1) / (limit - 1))) for k in range(limit)})
+        picked[0] = 0
+        picked[-1] = n - 1
+        scene_idx = [scene_idx[k] for k in picked]
+    keep = set(scene_idx)
+
+    # ---- 第二遍：同参数再解一遍，命中帧产出 ----
+    container, v_stream = _open_video_threaded(path)
+    if v_stream is None:
+        return
+    try:
+        v_stream.codec_context.skip_frame = "NONKEY"
+        for i, f in enumerate(container.decode(v_stream)):
+            if i not in keep:
+                continue
+            actual_t = tss[i] if i < len(tss) else (f.time or 0.0)
+            img = _video_pil(f.to_ndarray(format="bgr24"), max_pixel)
+            slice_dict = {
+                "modality": "video_frame",
+                "location": _format_ts(actual_t),
+                "text": "",
+                "keywords": f"{path.stem} t={_format_ts(actual_t)}",
+                "_pil": img,
+                "_ts": actual_t,
+                "_reason": "scene",
+            }
+            if embedder is not None:
+                try:
+                    slice_dict["vector"] = embedder.embed_image_pil(img)
+                except Exception:
+                    pass
+            yield slice_dict
+
+    finally:
+        container.close()
+
+
 def iter_video_slices(path: Path, embedder=None, *,
                      sample_interval_sec: float | None = None,
                      max_frames: int = 1200,
                      ahash_tolerance: int | None = None,
                      max_pixel: int | None = None) -> Iterator[dict]:
-    """视频帧切片：每 N 秒抽一帧 + aHash 去重 + 抽帧前缩到 max_pixel。
+    """视频帧切片（两种模式，config.VIDEO_SCENE_MODE 控制）：
 
-    仿 DigUp VideoExtractor.keyframes(of:every:maxPixel:maxFrames:to:)：
-    - 用 PyAV 跳到 IDR 关键帧（避免 cv2.set(CAP_PROP_POS_MSEC) 跳黑帧）
-    - 8×8 平均哈希与上一保留帧对比，XOR ≤ tolerance bit 即丢弃
-    - 抽出的帧先缩到 max_pixel 长边（嵌入时不再二次缩，省内存 + 速度）
+    - scene（默认）：skip_frame=NONKEY 只解关键帧 + aHash 场景检测 +
+      超上限等距抽稀（VIDEO_SCENE_MAX_SLICES，默认 48）。覆盖场景即可，
+      静止/缓变画面零嵌入成本——几小时视频抽几十个代表镜头。
+    - tick（回退，TRACE_VIDEO_SCENE=0）：每 N 秒抽一帧 + aHash 去重
+      （DigUp VideoExtractor.keyframes 口径）。
 
     Args:
         path: 视频文件路径
         embedder: 可选；若提供 embedder.embed_image_pil 则每帧嵌入视觉向量
-        sample_interval_sec: 采样间隔（默认 config.VIDEO_FRAME_INTERVAL_SEC）
-        max_frames: 单视频最多产出的切片数（防爆，默认 1200）
+        sample_interval_sec: tick 模式采样间隔（默认 config.VIDEO_FRAME_INTERVAL_SEC）
+        max_frames: 单视频最多产出的切片数（防爆，默认 1200；scene 模式
+                    与 VIDEO_SCENE_MAX_SLICES 取小）
         ahash_tolerance: aHash 重复阈值（默认 config.VIDEO_AHASH_TOLERANCE）
         max_pixel: 抽帧前长边缩放（默认 config.VIDEO_FRAME_MAX_PIXEL）
     """
@@ -255,6 +363,16 @@ def iter_video_slices(path: Path, embedder=None, *,
         cap_meta.release()
     if not duration_s or duration_s <= 0:
         return
+
+    # ---- 1.5 场景模式（默认）：关键帧-only 解码 + aHash 场景检测 + 上限抽稀 ----
+    if config.VIDEO_SCENE_MODE:
+        try:
+            yield from _iter_video_scene_slices(
+                path, embedder, max_pixel=max_pixel,
+                ahash_tolerance=ahash_tolerance, max_frames=max_frames)
+            return
+        except Exception:
+            pass  # 场景路径失败 → 回退下方 tick 均匀采样
 
     # ---- 2. 步长：固定间隔 OR 等比分到 max_frames（DigUp 公式）----
     step = max(sample_interval_sec, duration_s / max_frames)
