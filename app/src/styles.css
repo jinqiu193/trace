@@ -1362,6 +1362,11 @@ select:focus-visible {
   overflow: hidden;
   animation: popIn 0.22s var(--ease-out);
 }
+/* 图片预览必须有明确高度：stage 内 img/loading 均为 absolute 定位，
+   无 height 时 flex:1 无内容可撑 → 高度塌缩为 0，图片区域消失 */
+.image-preview-window {
+  height: 90vh;
+}
 .video-preview-header,
 .image-preview-header {
   display: flex;
