@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { api, SearchResult, SortKey, VideoHit } from "../api";
+import { api, SearchResult, SortKey, SearchMode, VideoHit } from "../api";
 import {
   IconSearch, IconImage, IconClose, IconSimilar, IconList, IconGrid,
   IconClock, IconCopy, IconDownload, IconSparkle, IconUpload, IconKeyboard, IconCheck,
@@ -160,6 +160,13 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   const [threshold, setThreshold] = useState(0);
   const [dateRange, setDateRange] = useState("");    // "" / today / week / month / year
   const [sizeRange, setSizeRange] = useState("");    // "" / lt10 / 10-100 / 100-1024 / gt1024
+  // 检索模式：详细（全切片+命中详情）/ 简单（视频每文件 2 代表片段，更快）
+  const [mode, setMode] = useState<SearchMode>(() =>
+    (localStorage.getItem("trace.mode") as SearchMode) === "fast" ? "fast" : "detailed");
+  const switchMode = (m: SearchMode) => {
+    setMode(m);
+    localStorage.setItem("trace.mode", m);
+  };
 
   // 以图搜图状态
   const [imgFile, setImgFile] = useState<File | null>(null);
@@ -315,6 +322,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             sort,
             file_type: fileType || undefined,
             dir: dir || undefined,
+            mode,
           });
           if (cancelled) return;
           setResults(r.results);
@@ -341,6 +349,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             text: text || undefined,
             file_type: fileType || undefined,
             dir: dir || undefined,
+            mode,
           });
           setResults(r.results);
           setMs(r.ms);
@@ -369,6 +378,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           mtime_after: dateRangeToAfter(dateRange),
           min_size: sz.min,
           max_size: sz.max,
+          mode,
         });
         setResults(r.results);
         setMs(r.ms);
@@ -382,7 +392,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
       }
     }, 150);
     return () => clearTimeout(t);
-  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, sizeRange, limit, sort]);
+  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, sizeRange, mode, limit, sort]);
 
   // 历史记录：查询稳定 2s 后写入（避免打字中间态全部入史）
   useEffect(() => {
@@ -739,6 +749,18 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             >✕ 重置</button>
           )}
           <span className="toolbar-spacer" />
+          <div className="mode-seg" role="group" aria-label="检索模式">
+            <button
+              className={"mode-seg-btn" + (mode === "fast" ? " active" : "")}
+              onClick={() => switchMode("fast")}
+              title="简单：视频每个文件仅比对 2 个代表片段，跳过命中详情组装，速度更快"
+            >⚡ 简单</button>
+            <button
+              className={"mode-seg-btn" + (mode === "detailed" ? " active" : "")}
+              onClick={() => switchMode("detailed")}
+              title="详细：全片段比对 + 时间轴命中标记 + 周边帧，结果最全（默认）"
+            >详细</button>
+          </div>
           <label className="sort-label">排序</label>
           <select className="sort-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
             {SORTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}

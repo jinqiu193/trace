@@ -1913,3 +1913,25 @@ select:focus-visible {
   color: #c3d4b3;
   border-color: rgba(163, 191, 142, 0.35);
 }
+
+/* ---- 检索模式切换（简单/详细） ---- */
+.mode-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-seg-btn {
+  background: transparent;
+  color: var(--fg-3);
+  border: none;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.mode-seg-btn + .mode-seg-btn { border-left: 1px solid var(--border); }
+.mode-seg-btn:hover { color: var(--fg); background: var(--bg-hover); }
+.mode-seg-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-2);
+}

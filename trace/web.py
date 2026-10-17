@@ -69,6 +69,7 @@ class SearchBody(BaseModel):
     mtime_before: Optional[float] = None  # 修改时间上限
     min_size: Optional[int] = None        # 文件大小下限（字节）
     max_size: Optional[int] = None        # 文件大小上限
+    mode: str = "detailed"                # detailed（全切片+命中详情）/ fast（视频每文件 2 代表片段）
 
 
 class SimilarBody(BaseModel):
@@ -78,6 +79,7 @@ class SimilarBody(BaseModel):
     file_type: Optional[str] = None
     dir: Optional[str] = None
     sort: str = "relevance"
+    mode: str = "detailed"
 
 
 class IndexBody(BaseModel):
@@ -199,6 +201,7 @@ def search(body: SearchBody) -> dict:
                               mtime_before=body.mtime_before,
                               min_size=body.min_size,
                               max_size=body.max_size,
+                              mode=body.mode,
                               with_facets=True)
 
 
@@ -214,6 +217,7 @@ async def search_image(
     dir: Optional[str] = Form(None),
     sort: str = Form("relevance"),
     text: Optional[str] = Form(None),
+    mode: str = Form("detailed"),
 ) -> dict:
     """以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索。
 
@@ -248,7 +252,7 @@ async def search_image(
                         limit=limit, offset=max(0, offset),
                         file_type=file_type, dir_filter=dir,
                         sort=sort, with_facets=True,
-                        text=text or "")
+                        text=text or "", mode=mode)
     results, facets = r
     label = f"(以图搜图{f' · {text.strip()}' if text and text.strip() else ''})"
     return {"query": label, "ms": round((_time.time() - t0) * 1000, 1),
@@ -267,7 +271,7 @@ def search_similar(body: SimilarBody) -> dict:
     r = search_by_sid(s.store, s.get_embedder(), body.sid,
                       limit=body.limit, offset=max(0, body.offset),
                       file_type=body.file_type, dir_filter=body.dir,
-                      sort=body.sort, with_facets=True)
+                      sort=body.sort, with_facets=True, mode=body.mode)
     results, facets = r
     return {"query": f"(相似 #{body.sid})", "ms": round((_time.time() - t0) * 1000, 1),
             "results": results, "facets": facets, "mode": "similar"}

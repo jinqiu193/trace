@@ -47,6 +47,9 @@ export interface VideoHit {
 
 export type SortKey = "relevance" | "mtime_desc" | "mtime_asc" | "size_desc" | "name";
 
+/** 检索模式：detailed 全切片+命中详情；fast 视频每文件仅 2 代表片段 */
+export type SearchMode = "detailed" | "fast";
+
 export interface SearchResult {
   score: number;
   path: string;
@@ -156,6 +159,7 @@ export const api = {
     limit?: number; offset?: number; file_type?: string; dir?: string;
     threshold?: number; sort?: SortKey;
     mtime_after?: number; mtime_before?: number; min_size?: number; max_size?: number;
+    mode?: SearchMode;
   }) =>
     json<SearchResponse>("POST", "/api/search", {
       query, limit: opts?.limit ?? 10, offset: opts?.offset ?? 0,
@@ -163,15 +167,17 @@ export const api = {
       sort: opts?.sort ?? "relevance",
       mtime_after: opts?.mtime_after, mtime_before: opts?.mtime_before,
       min_size: opts?.min_size, max_size: opts?.max_size,
+      mode: opts?.mode ?? "detailed",
     }),
   /** 以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索；text 非空为图+文联合查询 */
-  searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey; text?: string }) => {
+  searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey; text?: string; mode?: SearchMode }) => {
     const b = await base();
     const fd = new FormData();
     fd.append("file", file, file.name);
     fd.append("limit", String(opts?.limit ?? 20));
     fd.append("offset", String(opts?.offset ?? 0));
     fd.append("sort", opts?.sort ?? "relevance");
+    fd.append("mode", opts?.mode ?? "detailed");
     if (opts?.text) fd.append("text", opts.text);
     if (opts?.file_type) fd.append("file_type", opts.file_type);
     if (opts?.dir) fd.append("dir", opts.dir);
@@ -183,10 +189,11 @@ export const api = {
     return r.json() as Promise<SearchResponse>;
   },
   /** More like this：以某切片向量搜最相似文件（全模态） */
-  searchSimilar: (sid: number, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey }) =>
+  searchSimilar: (sid: number, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey; mode?: SearchMode }) =>
     json<SearchResponse>("POST", "/api/search/similar", {
       sid, limit: opts?.limit ?? 20, offset: opts?.offset ?? 0,
       file_type: opts?.file_type, dir: opts?.dir, sort: opts?.sort ?? "relevance",
+      mode: opts?.mode ?? "detailed",
     }),
   /** 近似重复图片检测报告 */
   duplicates: (threshold: number = 0.95) =>

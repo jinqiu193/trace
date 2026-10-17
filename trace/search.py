@@ -197,11 +197,56 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
     return kw_file_slice, kw_all, coverage, fuzzy
 
 
+# ---- 查询向量 LRU 缓存 ----
+# 实测瓶颈：embed_query 的 ONNX 前向 ≈500ms，占检索总耗时 99%。
+# 用户调筛选/翻页/切排序时同一查询词反复触发——缓存后这些场景直接 0ms。
+_QUERY_VEC_CACHE: dict[str, np.ndarray] = {}
+_QUERY_VEC_CACHE_MAX = 32
+
+
+def _cached_query_vector(embedder, query: str) -> np.ndarray:
+    qv = _QUERY_VEC_CACHE.get(query)
+    if qv is not None:
+        return qv
+    qv = np.asarray(embedder.embed_query(query), dtype=np.float32)
+    qv /= max(np.linalg.norm(qv), 1e-9)
+    if len(_QUERY_VEC_CACHE) >= _QUERY_VEC_CACHE_MAX:
+        _QUERY_VEC_CACHE.pop(next(iter(_QUERY_VEC_CACHE)))  # FIFO 淘汰
+    _QUERY_VEC_CACHE[query] = qv
+    return qv
+
+
+_VIDEO_MODALITIES = ("video_frame", "video_sound")
+
+
+def _fast_mode_keep(fids, mods) -> "np.ndarray":
+    """简单模式行掩码：非视频行全保留；视频行每文件保留 1/4 与 3/4 两个代表位。
+
+    位置而非随机：片头常是黑场/标题，1/4 与 3/4 比首尾更有代表性；
+    切片按写入序 ≈ 时间序。
+    """
+    n = len(fids)
+    keep = np.ones(n, dtype=bool)
+    by_fid: dict[int, list[int]] = {}
+    for i in range(n):
+        if mods[i] in _VIDEO_MODALITIES:
+            by_fid.setdefault(int(fids[i]), []).append(i)
+    for _fid, idxs in by_fid.items():
+        if len(idxs) <= 2:
+            continue
+        pick = {idxs[len(idxs) // 4], idxs[(3 * len(idxs)) // 4]}
+        for i in idxs:
+            if i not in pick:
+                keep[i] = False
+    return keep
+
+
 def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
            file_type: str | None = None, dir_filter: str | None = None,
            z_gate: float | None = None, sort: str = "relevance",
            mtime_after: float | None = None, mtime_before: float | None = None,
            min_size: int | None = None, max_size: int | None = None,
+           mode: str = "detailed",
            with_facets: bool = False) -> list[dict] | tuple[list[dict], dict]:
     """混合语义+关键词检索，返回按融合分排序的文件级结果。
 
@@ -211,11 +256,12 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         sort: 文件级排序维度（relevance/mtime_desc/mtime_asc/size_desc/name）。
         mtime_after/before: 修改时间窗口（epoch 秒，含下界不含上界）。
         min_size/max_size: 文件大小窗口（字节）。
+        mode: "detailed"（默认，全切片 + 命中详情）/ "fast"（视频每文件
+            仅比对 2 个代表片段，跳过命中详情组装）。
         with_facets: True 时返回 (results, facets)——类型分布计数。
     """
     z_gate = z_gate if z_gate is not None else Z_GATE
-    qv = np.asarray(embedder.embed_query(query), dtype=np.float32)
-    qv /= max(np.linalg.norm(qv), 1e-9)
+    qv = _cached_query_vector(embedder, query)
 
     # ---- 1. 语义通道：全量 cosine + z-score（矩阵缓存）----
     sids, fids, mods, matrix = store.all_vectors_matrix()
@@ -224,9 +270,14 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
     vid_sem: dict[int, list[tuple[float, int]]] = {}
     if len(sids):
         cos = matrix @ qv
+        # z-score 恒用全量分布（fast 抽稀后样本太少，分布会失真）
         z = _meaning(cos, mods)
+        # fast 模式：视频切片每文件只保留 1/4 与 3/4 两个代表位参与命中
+        keep = _fast_mode_keep(fids, mods) if mode == "fast" else None
         # 每文件取最佳切片（向量化：np.unique + argmax 思路，循环仅用于并列少的情况）
         for i in range(len(sids)):
+            if keep is not None and not keep[i]:
+                continue
             fid = int(fids[i])
             cur = best_sem.get(fid)
             if cur is None or z[i] > cur[0]:
@@ -338,12 +389,13 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         need_sids.update(sid for _sc, sid, _src in lst)
     slice_rows = store.slices_by_ids(list(need_sids)) if need_sids else {}
 
-    # 视频帧位置批量取（仅 video 命中）
-    video_fids = [item["file_id"] for _s, item in page
-                  if item["row"]["file_type"] == "video" and item.get("video_loc_ts")]
+    # 视频帧位置批量取（仅 video 命中；fast 模式跳过——无 nearby_frames，省全帧扫描）
     frame_locs: dict[int, list[str]] = {}
-    for vfid in video_fids:
-        frame_locs[vfid] = store.frame_locations(vfid)
+    if mode != "fast":
+        video_fids = [item["file_id"] for _s, item in page
+                      if item["row"]["file_type"] == "video" and item.get("video_loc_ts")]
+        for vfid in video_fids:
+            frame_locs[vfid] = store.frame_locations(vfid)
 
     out: list[dict] = []
     top_score = scored[0][0] if scored else 0.0
@@ -537,7 +589,7 @@ def name_search(store, query: str, limit: int = 20, offset: int = 0,
 def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
                     file_type: str | None = None, dir_filter: str | None = None,
                     sort: str = "relevance", with_facets: bool = False,
-                    text: str = ""):
+                    text: str = "", mode: str = "detailed"):
     """以图搜图：上传图片 → 视觉嵌入 → 与库内视觉切片（image/video_frame）cos 检索。
 
     查询向量与图片/视频帧切片同源（embed_image_pil，BOI token 口径），
@@ -553,12 +605,13 @@ def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
     qv /= max(float(np.linalg.norm(qv)), 1e-9)
     return _pool_search(store, qv, limit=limit, offset=offset, file_type=file_type,
                         dir_filter=dir_filter, sort=sort, with_facets=with_facets,
-                        vis_only=True)
+                        vis_only=True, mode=mode)
 
 
 def search_by_sid(store, embedder, sid: int, limit: int = 20, offset: int = 0,
                   file_type: str | None = None, dir_filter: str | None = None,
-                  sort: str = "relevance", with_facets: bool = False):
+                  sort: str = "relevance", with_facets: bool = False,
+                  mode: str = "detailed"):
     """More like this：以某个切片的向量做查询，找最相似的文件。
 
     全模态参与（文本/图片/视频帧），z-score 在参与模态内归一；
@@ -569,13 +622,13 @@ def search_by_sid(store, embedder, sid: int, limit: int = 20, offset: int = 0,
         return ([], {}) if with_facets else []
     return _pool_search(store, qv, limit=limit, offset=offset, file_type=file_type,
                         dir_filter=dir_filter, sort=sort, with_facets=with_facets,
-                        vis_only=False)
+                        vis_only=False, mode=mode)
 
 
 def _pool_search(store, qv, limit: int = 20, offset: int = 0,
                  file_type: str | None = None, dir_filter: str | None = None,
                  sort: str = "relevance", with_facets: bool = False,
-                 vis_only: bool = False,
+                 vis_only: bool = False, mode: str = "detailed",
                  mtime_after: float | None = None, mtime_before: float | None = None,
                  min_size: int | None = None, max_size: int | None = None):
 
@@ -592,6 +645,10 @@ def _pool_search(store, qv, limit: int = 20, offset: int = 0,
         idx = [i for i, m in enumerate(mods) if m in VISION_MODALITIES]
     else:
         idx = list(range(len(mods)))
+    if mode == "fast" and len(idx) > 2:
+        # 简单模式：视频切片每文件只留 2 个代表位（与文字搜索同策略）
+        keep = _fast_mode_keep(fids, mods)
+        idx = [i for i in idx if keep[i]]
     if not idx:
         return ([], {}) if with_facets else []
 
