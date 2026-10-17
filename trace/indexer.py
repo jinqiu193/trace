@@ -427,37 +427,43 @@ class Indexer:
         if progress:
             progress(dict(stats))
 
-        batch_n = 0
-        for path in all_files:
+        # 分块批量事务：每 BATCH_COMMIT_FILES 个文件统一 commit。
+        # WAL 下未提交事务不阻塞搜索线程读；中途崩溃只丢当前块（下次增量补回）。
+        # per-file 异常在块内吞掉继续，半写文件状态与逐文件 commit 模式等价。
+        step = max(1, config.BATCH_COMMIT_FILES)
+        for i in range(0, len(all_files), step):
             if cancel is not None and cancel.is_set():
                 stats["cancelled"] = True
                 break
-            spath = str(path)
-            # 进入文件前先上报 current（大文件嵌入可达数分钟）
-            if progress:
-                progress(dict(stats, current=spath))
-            stats["scanned"] += 1
-            seen.add(spath)
-            try:
-                st = path.stat()
-            except OSError:
-                stats["errors"] += 1
-                continue
-            try:
-                with self.store.batch():
-                    self._index_one(path, st, full, stats)
-            except Exception as e:
-                stats["errors"] += 1
-                log.warning("索引失败 %s: %s", spath, e)
-            batch_n += 1
-            if progress:
-                progress(dict(stats, current=spath))
-            if self.verbose and stats["scanned"] % 50 == 0:
-                log.info("… 已扫描 %d/%d 个文件（索引 %d，跳过 %d）",
-                         stats["scanned"], stats["total"],
-                         stats["indexed"], stats["skipped"])
-            if batch_n >= config.BATCH_COMMIT_FILES:
-                batch_n = 0  # batch() 已在退出时 commit；计数器仅用于日志节奏
+            with self.store.batch():
+                for path in all_files[i:i + step]:
+                    if cancel is not None and cancel.is_set():
+                        stats["cancelled"] = True
+                        break
+                    spath = str(path)
+                    # 进入文件前先上报 current（大文件嵌入可达数分钟）
+                    if progress:
+                        progress(dict(stats, current=spath))
+                    stats["scanned"] += 1
+                    seen.add(spath)
+                    try:
+                        st = path.stat()
+                    except OSError:
+                        stats["errors"] += 1
+                        continue
+                    try:
+                        self._index_one(path, st, full, stats)
+                    except Exception as e:
+                        stats["errors"] += 1
+                        log.warning("索引失败 %s: %s", spath, e)
+                    if progress:
+                        progress(dict(stats, current=spath))
+                    if self.verbose and stats["scanned"] % 50 == 0:
+                        log.info("… 已扫描 %d/%d 个文件（索引 %d，跳过 %d）",
+                                 stats["scanned"], stats["total"],
+                                 stats["indexed"], stats["skipped"])
+            if stats["cancelled"]:
+                break
 
         # 对账：root 下已消失的文件删索引。
         # 安全护栏：若 seen 数远小于 DB 现有数，说明遍历被中断（强制 kill / 异常），
