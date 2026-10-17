@@ -79,6 +79,22 @@ class IndexTaskManager:
         return self._launch(kind="index_paths", root=root, full=False, by=by, paths=paths)
 
     def _launch(self, kind: str, root: str, full: bool, by: str, paths) -> bool:
+        # 用户显式任务可抢占 watcher 自动任务（自动同步随时可重来，用户操作优先）。
+        # 抢占 = 置 cancel 后锁外等线程退出（_run 收尾要拿锁，锁内 join 会死锁）。
+        if by == "user":
+            for _ in range(60):  # 60 × 0.5s，最多等 30s
+                with self._lock:
+                    if not self._status["running"]:
+                        break
+                    if self._status["by"] != "watcher":
+                        return False  # 另一个用户任务在跑，不抢
+                    self._cancel.set()
+                t = self._thread
+                if t is not None and t.is_alive():
+                    t.join(timeout=0.5)
+            else:
+                log.warning("用户任务抢占 watcher 超时（30s 未退出），拒绝启动")
+                return False
         with self._lock:
             if self._status["running"]:
                 return False

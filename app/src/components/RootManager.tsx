@@ -97,10 +97,15 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
     if (roots.length === 0) return;
     setBusy(true);
     try {
-      await api.reindexAll();   // 后台任务，立即返回
+      await api.reindexAll();   // 后台任务，立即返回（watcher 自动任务会被抢占）
       onChanged?.();
     } catch (e: any) {
-      alert("全量重建失败：" + String(e?.message ?? e));
+      const msg = String(e?.message ?? e);
+      if (msg.includes("409")) {
+        alert("已有索引任务进行中，请等它完成，或先点「取消任务」再重建。");
+      } else {
+        alert("全量重建失败：" + msg);
+      }
     } finally {
       setBusy(false);
     }
