@@ -74,6 +74,37 @@ def _iter_files(root: Path):
                 continue
 
 
+_HASH_CHUNK = 1 << 20  # 1MB
+
+
+def _content_hash(path: Path, size: int) -> str | None:
+    """内容指纹（同内容多路径去重用）：
+
+    - ≤2MB 文件：全文件 sha256（小文件准确判定）
+    - 大文件：size + 头 1MB + 尾 1MB（视频重编码必然改变，仅同源拷贝相同；
+      读 2MB 约 20ms，不构成索引瓶颈）
+    返回 None = 读取失败（跳过去重，正常走索引）。
+    """
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            h.update(str(size).encode())
+            if size <= 2 * _HASH_CHUNK:
+                while True:
+                    b = f.read(_HASH_CHUNK)
+                    if not b:
+                        break
+                    h.update(b)
+            else:
+                h.update(f.read(_HASH_CHUNK))
+                f.seek(-_HASH_CHUNK, 2)
+                h.update(f.read(_HASH_CHUNK))
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 class Indexer:
     def __init__(self, store, embedder, verbose=True):
         self.store = store
@@ -267,15 +298,41 @@ class Indexer:
         buf.clear()
 
     def _index_one(self, path: Path, st, full: bool, stats: dict) -> None:
-        """处理单个文件：提取切片 → 向量化 → 入库。所有异常 per-file 吞掉记 errors。"""
+        """处理单个文件：提取切片 → 向量化 → 入库。所有异常 per-file 吞掉记 errors。
+
+        v2（2026-10-18）增量判定：stat 未变 AND files.extraction 与当前算法
+        指纹一致才跳过——模型/抽取算法升级后，增量任务会自动逐文件重索，
+        不再整库拒绝。同内容去重：头尾哈希命中已索引文件时直接克隆切片，
+        跳过抽取与嵌入。
+        """
         spath = str(path)
         kind = readers.classify(path)
         if kind == "other":
             return
+        ext_fp = config.extraction_fingerprint(kind)
         old = self.store.get_file(spath)
-        if old and not full and old["size"] == st.st_size and abs(old["mtime"] - st.st_mtime) < 1e-6:
+        if (old and not full and old["size"] == st.st_size
+                and abs(old["mtime"] - st.st_mtime) < 1e-6
+                and old["extraction"] == ext_fp):
             stats["skipped"] += 1
             return
+
+        # 同内容去重：同源拷贝/改名副本复用既有向量，不重跑抽取+嵌入
+        chash = _content_hash(path, st.st_size)
+        if chash and not full:
+            src = self.store.find_file_by_hash(chash, spath, file_type=kind)
+            if src is not None and src["extraction"] == ext_fp:
+                file_id = self.store.upsert_file(
+                    spath, st.st_size, st.st_mtime, kind, kind, "indexed",
+                    ext_fp, chash)
+                src_stem = Path(src["name"]).stem if src["name"] else ""
+                n = self.store.clone_slices(
+                    src["file_id"], file_id,
+                    rename=(src_stem, path.stem) if src_stem != path.stem else None)
+                stats["dedup"] += 1
+                log.info("内容去重：%s ← %s（克隆 %d 切片，跳过嵌入）",
+                         spath, src["path"], n)
+                return
 
         slices: list[dict] = []
         status = "indexed"
@@ -299,7 +356,10 @@ class Indexer:
         if status == "metadata_only":
             stats["metadata_only"] += 1
 
-        file_id = self.store.upsert_file(spath, st.st_size, st.st_mtime, kind, kind, status)
+        # extraction 一律落库：即使 metadata_only 也标记"当前算法已尝试"，
+        # stat 不变 + 算法不变就不再反复重试坏文件（强制重试用 full）
+        file_id = self.store.upsert_file(spath, st.st_size, st.st_mtime, kind, kind,
+                                         status, ext_fp, chash)
         try:
             if slices:
                 # 标题 prompt（DigUp Prompts.document）+ hasWords 过滤
@@ -345,18 +405,19 @@ class Indexer:
 
     def _index_root_impl(self, root: str, full: bool, progress, cancel, root_path: Path) -> dict:
 
-        # 指纹检查：模型/prompt/切片参数变化后，旧向量不可与新向量比较（DigUp 同款）
+        # 指纹变化（模型/算法升级）不再拒绝增量（2026-10-18 v2）：per-file
+        # extraction 判定会让指纹不符的文件自动重索，跑完即全库升级。
+        # 此处仅提示。全局 meta 仍记录当前指纹（/api/status 展示用）。
         fp_now = config.FINGERPRINT
         fp_old = self.store.get_meta("fingerprint")
         if fp_old is not None and fp_old != fp_now and not full:
-            log.warning("索引指纹已变化（%s → %s），旧向量不可混用，请用 --full 全量重建。",
-                        fp_old, fp_now)
-            return {"scanned": 0, "indexed": 0, "skipped": 0, "metadata_only": 0,
-                    "errors": 0, "removed": 0, "seconds": 0.0, "total": 0, "cancelled": False}
+            log.info("索引指纹已变化（%s → %s），增量将自动重索受影响文件。",
+                     fp_old, fp_now)
 
         self.store.add_root(str(root_path))
         stats = {"scanned": 0, "indexed": 0, "skipped": 0, "metadata_only": 0,
-                 "errors": 0, "removed": 0, "total": 0, "cancelled": False}
+                 "errors": 0, "removed": 0, "total": 0, "cancelled": False,
+                 "dedup": 0}
         t0 = time.time()
         seen: set[str] = set()
 
@@ -412,9 +473,9 @@ class Indexer:
                         stats["removed"] += 1
 
         stats["seconds"] = round(time.time() - t0, 1)
-        # 仅在完整跑完时落指纹：中途取消的库是"部分新向量 + 部分旧向量"，
-        # 若写入新指纹会让下次增量误以为已同步 → 新旧向量混用且无提示
-        # （2026-10-17 修）。取消时不写，下次增量会因指纹不符要求全量重建。
+        # 全局指纹 meta 仅作展示（/api/status）；增量判定完全依赖 per-file
+        # extraction，因此取消导致的"部分新部分旧"会在下次增量自动补齐
+        # 重索，不再有混用风险。仍只完整跑完才写。
         if not stats["cancelled"]:
             self.store.set_meta("fingerprint", config.FINGERPRINT)
         if progress:
@@ -427,7 +488,8 @@ class Indexer:
     def index_paths(self, paths: list[str], progress=None,
                     cancel: threading.Event | None = None) -> dict:
         stats = {"scanned": 0, "indexed": 0, "skipped": 0, "metadata_only": 0,
-                 "errors": 0, "removed": 0, "total": len(paths), "cancelled": False}
+                 "errors": 0, "removed": 0, "total": len(paths), "cancelled": False,
+                 "dedup": 0}
         t0 = time.time()
         self._cancel = cancel  # 供 _extract_slices 流水线批间检查
         try:

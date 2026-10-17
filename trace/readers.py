@@ -234,29 +234,187 @@ def _open_video_threaded(path):
     return container, v_stream
 
 
+def _probe_duration_av(path: Path) -> float | None:
+    """PyAV 容器/流级时长（秒）；拿不到返回 None。"""
+    import av
+    try:
+        with av.open(str(path)) as container:
+            if container.duration:
+                return float(container.duration) / av.time_base
+            for s in container.streams:
+                if s.duration is not None and s.time_base:
+                    d = float(s.duration * s.time_base)
+                    if d > 0:
+                        return d
+    except Exception:
+        pass
+    return None
+
+
+_FFPROBE_CACHE: dict[str, float | None] = {}
+
+
+def _probe_duration_ffmpeg(path: Path) -> float | None:
+    """av 拿不到时长时的兜底：ffmpeg -i 解析 stderr 的 Duration 行。
+
+    只对损坏 header / 流式封装（部分 .ts/.flv）生效；结果按路径缓存。
+    """
+    key = str(path)
+    if key in _FFPROBE_CACHE:
+        return _FFPROBE_CACHE[key]
+    dur = None
+    try:
+        import re
+        import shutil
+        import subprocess
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            cand = Path(__file__).resolve().parent.parent / "tools" / "ffmpeg.exe"
+            if cand.exists():
+                ffmpeg = str(cand)
+            else:
+                try:
+                    import imageio_ffmpeg
+
+                    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    ffmpeg = None
+        if ffmpeg:
+            p = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", key],
+                capture_output=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)",
+                          (p.stderr or b"").decode("utf-8", "ignore"))
+            if m:
+                dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                if dur <= 0:
+                    dur = None
+    except Exception:
+        dur = None
+    if len(_FFPROBE_CACHE) > 512:
+        _FFPROBE_CACHE.clear()
+    _FFPROBE_CACHE[key] = dur
+    return dur
+
+
+def probe_duration(path: Path) -> float | None:
+    """媒体时长（秒）：av 容器/流 → ffmpeg 兜底。两者都失败返回 None。"""
+    d = _probe_duration_av(path)
+    if d is None or d <= 0:
+        d = _probe_duration_ffmpeg(path)
+    return d if (d and d > 0) else None
+
+
+def _adaptive_count(duration_s: float, span: float, lo: int, hi: int) -> int:
+    """自适应采样数：每 span 秒一个，钳在 [lo, hi]。"""
+    import math
+    return max(lo, min(hi, math.ceil(duration_s / max(span, 1e-6))))
+
+
+def _keyframe_timestamps(path: Path, limit: int = 100000) -> list[float]:
+    """demux 只读关键帧时间戳（不解码任何像素，秒级完成）。
+
+    编码器（x264 scenecut 等）在场景切换处插 I 帧 → 关键帧密度是
+    "内容变化密集区"的廉价代理，用于把 seek 采样点拉向这些区域。
+    恒定 GOP（每 N 秒一 I 帧）密度均匀 → 加权自动退化为等距，无副作用。
+    """
+    import av
+    out: list[float] = []
+    try:
+        with av.open(str(path)) as container:
+            v_stream = next((s for s in container.streams if s.type == "video"), None)
+            if v_stream is None:
+                return out
+            tb = float(v_stream.time_base) if v_stream.time_base else None
+            start = v_stream.start_time or 0
+            for pkt in container.demux(v_stream):
+                if len(out) >= limit:
+                    break
+                if not pkt.is_keyframe or pkt.dts is None:
+                    continue
+                # pts 缺失时退用 dts；换算到秒（相对流起点）
+                raw = pkt.pts if pkt.pts is not None else pkt.dts
+                if tb:
+                    out.append(max(0.0, (raw - start) * tb))
+                else:
+                    out.append(float(raw))
+    except Exception:
+        return []
+    out.sort()
+    return out
+
+
+def _weighted_targets(kf_ts: list[float], duration_s: float, n: int) -> list[float] | None:
+    """关键帧密度加权的目标点：等距点与 CDF 分位点各 50% 混合。
+
+    - CDF 分位点：关键帧经验分布的逆函数 → 场景切换密集区采样更密
+    - 与等距 50% 混合：防止密度极端倾斜时采样点聚到一小段
+    - 最小间距约束 duration/(2n)：进一步保证全程覆盖
+    关键帧过少（信息不足）返回 None → 调用方回退纯等距。
+    """
+    if not kf_ts or len(kf_ts) < n * 2:
+        return None
+    ts = [t for t in kf_ts if 0 <= t <= duration_s] or kf_ts
+    m = len(ts)
+    targets: list[float] = []
+    for i in range(n):
+        equi = duration_s * (i + 0.5) / n
+        idx = (i + 0.5) / n * (m - 1)
+        lo = int(idx)
+        hi = min(lo + 1, m - 1)
+        frac = idx - lo
+        cdf = ts[lo] * (1 - frac) + ts[hi] * frac
+        targets.append(0.5 * (equi + cdf))
+    # 防聚集：相邻点间距至少 duration/(2n)，不足则往后摊开
+    min_gap = duration_s / (2 * n)
+    for i in range(1, n):
+        if targets[i] - targets[i - 1] < min_gap:
+            targets[i] = targets[i - 1] + min_gap
+    # 摊开可能把尾部推出 duration → 整体往回收
+    if targets[-1] > duration_s:
+        shift = targets[-1] - duration_s
+        targets = [max(0.0, t - shift) for t in targets]
+        for i in range(1, n):
+            if targets[i] - targets[i - 1] < min_gap:
+                targets[i] = targets[i - 1] + min_gap
+                targets[i] = min(targets[i], duration_s)
+    return targets
+
+
 def _iter_video_seek_slices(path: Path, embedder, *, max_pixel: int,
                             max_frames: int, cancel=None) -> Iterator[dict]:
-    """等距 seek 抽帧（最快；2026-10-17 用户口径：任意视频只留 N 帧）。
+    """seek 抽帧 v2（2026-10-18）：N 随时长自适应 + 关键帧密度加权。
 
-    只 seek 到 N 个等分时间点各取一帧，不解全片——静止/缓变靠等距覆盖即可。
-    实测 2h 视频：seek 抽 5 帧 ~1-2s（vs 场景检测扫全片 32s）。
+    - N = clamp(ceil(dur/VIDEO_SLICE_SPAN_SEC), MIN, MAX)：短视频 5 帧、
+      2h ~8 帧、超长 ≤12 帧（固定 5 帧对 2h+ 视频太稀）
+    - 目标点 = 等距与关键帧 CDF 分位点各 50% 混合：demux 只读关键帧
+      时间戳（不解码），把采样点拉向场景切换密集区；恒定 GOP 自动退化为
+      等距。关键帧信息不足 → 纯等距（v1 行为）
+    - seek 后从关键帧推进到目标点（GOP 对齐），解码上限 600 帧防爆
     cancel: threading.Event；置位后在每个目标点边界立即返回。
     """
     import av
-    n = max(1, min(max_frames, config.VIDEO_SCENE_MAX_SLICES))
+    duration_s = probe_duration(path)
+    if not duration_s or duration_s <= 0:
+        return
+    n = min(_adaptive_count(duration_s, config.VIDEO_SLICE_SPAN_SEC,
+                            config.VIDEO_MIN_SLICES, config.VIDEO_MAX_SLICES),
+            max_frames)
+    n = max(1, n)
+    if config.VIDEO_KEYFRAME_WEIGHT:
+        kf_ts = _keyframe_timestamps(path)
+        targets = _weighted_targets(kf_ts, duration_s, n)
+    else:
+        targets = None
+    if targets is None:
+        targets = [duration_s * (i + 0.5) / n for i in range(n)]
     container, v_stream = _open_video_threaded(path)
     if v_stream is None:
         return
+    GOP_DECODE_LIMIT = 600  # 长 GOP 保护：最多前推 600 帧（60s@10fps）仍取不到就取当前
     try:
-        duration_s = None
-        if container.duration:
-            duration_s = float(container.duration) / av.time_base
-        elif v_stream.duration is not None and v_stream.time_base:
-            duration_s = float(v_stream.duration * v_stream.time_base)
-        if not duration_s or duration_s <= 0:
-            return
-        # N 个等分点（居中分布，避开片头/片尾黑场）
-        targets = [duration_s * (i + 0.5) / n for i in range(n)]
         for t in targets:
             if cancel is not None and cancel.is_set():
                 return
@@ -265,9 +423,11 @@ def _iter_video_seek_slices(path: Path, embedder, *, max_pixel: int,
             except Exception:
                 continue
             hit = None
+            decoded = 0
             for f in container.decode(v_stream):
+                decoded += 1
                 ft = f.time if f.time is not None else 0.0
-                if ft >= t - 1e-3:
+                if ft >= t - 1e-3 or decoded >= GOP_DECODE_LIMIT:
                     hit = (f, ft)
                     break
             if hit is None:
@@ -411,25 +571,8 @@ def iter_video_slices(path: Path, embedder=None, *,
     ahash_tolerance = ahash_tolerance if ahash_tolerance is not None else config.VIDEO_AHASH_TOLERANCE
     max_pixel = max_pixel if max_pixel is not None else config.VIDEO_FRAME_MAX_PIXEL
 
-    # ---- 1. 用 PyAV 取时长（cv2 拿不准 .mkv/.mov 的 frame count）----
-    duration_s: float | None = None
-    try:
-        import av
-        with av.open(str(path)) as container:
-            v_stream = next((s for s in container.streams if s.type == "video"), None)
-            if v_stream is not None and v_stream.duration is not None and v_stream.time_base:
-                duration_s = float(v_stream.duration * v_stream.time_base)
-    except Exception:
-        pass
-    if duration_s is None:
-        # cv2 fallback
-        cap_meta = cv2.VideoCapture(str(path))
-        if cap_meta.isOpened():
-            fps_m = cap_meta.get(cv2.CAP_PROP_FPS) or 25.0
-            total_m = int(cap_meta.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            if fps_m > 0 and total_m > 0:
-                duration_s = total_m / fps_m
-        cap_meta.release()
+    # ---- 1. 取时长（av → ffmpeg 兜底；供 scene/tick 回退模式与时长告警）----
+    duration_s = probe_duration(path)
     if not duration_s or duration_s <= 0:
         return
 
@@ -594,6 +737,34 @@ def _rms_int16(samples) -> float:
     return float(np.sqrt(np.mean((samples.astype(np.float32) / 32768.0) ** 2)))
 
 
+def _decode_audio_window(container, stream, sr: int, want_samples: int,
+                         cancel=None):
+    """从容器当前位置解码音频，攒满 want_samples 即停（不足则到流尾）。
+
+    每次调用新建 resampler：seek 后复用旧实例会残留重采样状态出杂音。
+    """
+    import numpy as np
+    import av
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
+    buf = np.empty(0, dtype=np.int16)
+    for frame in container.decode(stream):
+        if cancel is not None and cancel.is_set():
+            return None
+        rs = resampler.resample(frame)
+        if isinstance(rs, list):
+            rs = rs[0] if rs else None
+        if rs is None:
+            continue
+        pcm = rs.to_ndarray()
+        if pcm.ndim == 2:
+            pcm = pcm[0, :]  # mono 单通道
+        pcm = pcm.astype(np.int16, copy=False)
+        buf = np.concatenate([buf, pcm]) if buf.size else pcm
+        if buf.size >= want_samples:
+            return buf
+    return buf if buf.size else None
+
+
 def iter_audio_windows(path: Path, *,
                       window_sec: float | None = None,
                       hop_sec: float | None = None,
@@ -639,53 +810,58 @@ def iter_audio_windows(path: Path, *,
         except Exception:
             pass
 
-        # 音频窗上限（用户口径 2026-10-17：与视频 5 帧同量级）。
+        # 音频窗数自适应 v2（2026-10-18）：N = clamp(ceil(dur/SPAN), MIN, MAX)，
+        # 不再固定 5 窗；duration 用 probe_duration（av → ffmpeg 兜底）
         max_windows = max_windows if max_windows is not None else config.AUDIO_MAX_WINDOWS
-        duration_s = None
-        try:
-            if container.duration:
-                duration_s = float(container.duration) / av.time_base
-            elif audio_stream.duration is not None and audio_stream.time_base:
-                duration_s = float(audio_stream.duration * audio_stream.time_base)
-        except Exception:
-            duration_s = None
+        duration_s = probe_duration(path)
         if duration_s is not None and duration_s <= 0:
             duration_s = None
 
-        # ---- seek 等距模式（有总时长）：逐目标点 seek 取一个窗，不解全片 ----
-        # 实测 2h 音轨：seek 取 5 窗 ~3-5s（vs 全片顺序解码 40s）。
+        # ---- seek 模式（有总时长）：逐目标点 seek 取窗；静音则向前补采 ----
+        # v2：目标点静音不再直接丢弃（原实现 2h 视频常只产 4 窗），改为以
+        # 60s 步长向前探测 AUDIO_SILENCE_FWD_SEC 范围内最近的声音段；
+        # 探测只解 2s 判 RMS，命中才解完整 30s 窗。整段静音则放弃该窗。
         if duration_s and max_windows and max_windows > 0:
-            n = max(1, max_windows)
+            n = max(1, min(max_windows, _adaptive_count(
+                duration_s, config.AUDIO_SPAN_SEC,
+                config.AUDIO_MIN_WINDOWS, max_windows)))
             targets = [duration_s * (i + 0.5) / n for i in range(n)]
+            probe_samples = int(2.0 * sr)
             for t in targets:
                 if cancel is not None and cancel.is_set():
                     return
-                try:
-                    container.seek(int(t * av.time_base))  # 容器级 seek（微秒）
-                except Exception:
-                    continue
-                resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
-                buf = np.empty(0, dtype=np.int16)
-                for frame in container.decode(audio_stream):
+                seg = None
+                start = 0.0
+                probe_t = t
+                fwd_limit = min(t + config.AUDIO_SILENCE_FWD_SEC, duration_s)
+                while probe_t < fwd_limit:
+                    try:
+                        container.seek(int(probe_t * av.time_base))
+                    except Exception:
+                        break
+                    buf = _decode_audio_window(container, audio_stream, sr,
+                                               probe_samples, cancel)
                     if cancel is not None and cancel.is_set():
                         return
-                    rs = resampler.resample(frame)
-                    if isinstance(rs, list):
-                        rs = rs[0] if rs else None
-                    if rs is None:
-                        continue
-                    pcm = rs.to_ndarray()
-                    if pcm.ndim == 2:
-                        # mono 时只有 1 通道 → 取全部 samples（[0, :]）
-                        pcm = pcm[0, :]
-                    pcm = pcm.astype(np.int16, copy=False)
-                    buf = np.concatenate([buf, pcm]) if buf.size else pcm
-                    if buf.size >= window_samples:
+                    if buf is None or buf.size < min_samples:
+                        break  # 已越过尾部，无数据可解
+                    if _rms_int16(buf) > silence_rms:
+                        # 该点有声音：从同一点解完整窗口
+                        try:
+                            container.seek(int(probe_t * av.time_base))
+                        except Exception:
+                            break
+                        full = _decode_audio_window(container, audio_stream, sr,
+                                                    window_samples, cancel)
+                        if cancel is not None and cancel.is_set():
+                            return
+                        if full is not None and full.size >= min_samples:
+                            seg = full[:window_samples]
+                            start = probe_t
                         break
-                if buf.size >= min_samples:
-                    seg = buf[:window_samples]
-                    if _rms_int16(seg) > silence_rms:
-                        yield seg, t, t + window_sec
+                    probe_t += 60.0
+                if seg is not None:
+                    yield seg, start, start + window_sec
             return
 
         # ---- 顺序回退（无总时长）：取前 max_windows 个非静音窗 ----

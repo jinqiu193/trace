@@ -81,21 +81,34 @@ CHUNK_MAX_TOKENS = 480     # 文本块目标上限（留足前缀余量）
 CHUNK_OVERLAP_TOKENS = 64  # 相邻块重叠，防语义断裂
 AUDIO_WINDOW_SEC = 30      # 音频 30 秒窗口（EmbeddingGemma 2 audio 最多 30s）
 AUDIO_STRIDE_SEC = 25      # 步长 25 秒 → 5 秒重叠（DigUp：避免边缘词漏掉）
-AUDIO_MAX_WINDOWS = int(os.environ.get("TRACE_AUDIO_MAX_WINDOWS", "5"))
-    # 单视频/音频最多保留多少音窗（用户口径 2026-10-17：与视频 5 帧同量级）。
-    # 有总时长时等距抽 max_windows 个覆盖全程；否则顺序取前 max_windows 个
+# ---- 音频窗口数自适应（2026-10-18 v2）：N = clamp(ceil(dur/SPAN), MIN, MAX) ----
+AUDIO_MAX_WINDOWS = int(os.environ.get("TRACE_AUDIO_MAX_WINDOWS", "10"))
+    # 窗数上限（原"固定 5 窗"改为自适应：短音频 ≥4 窗，2h ≈6 窗，超长 ≤10）
+AUDIO_MIN_WINDOWS = 4
+AUDIO_SPAN_SEC = float(os.environ.get("TRACE_AUDIO_SPAN", "1200"))
+    # 每段时长 20 分钟一窗；2h → 6 窗
+AUDIO_SILENCE_FWD_SEC = float(os.environ.get("TRACE_AUDIO_SILENCE_FWD", "600"))
+    # 目标点静音时向前探测补采的最大范围（秒）；整段静音则放弃该窗
 VIDEO_FRAME_INTERVAL_SEC = 10  # tick 模式：每 10 秒抽一帧（scene 模式关闭时的回退口径）
 VIDEO_SEEK_MODE = os.environ.get("TRACE_VIDEO_SEEK", "1") != "0"
-    # 等距 seek 抽帧（2026-10-17 默认启用）：只 seek 到 N 个等分时间点各取一帧，
-    # 不解全片。此前"场景检测"要扫全片关键帧、"等距抽样"要全解码音频，帧数再少
-    # 也慢（2h 视频实测 93.8s）；seek 后 ~8s。TRACE_VIDEO_SEEK=0 回退下方模式。
+    # seek 抽帧（默认启用）：只 seek 到 N 个目标时间点各取一帧，不解全片。
+    # v2（2026-10-18）：N 随时长自适应 + 关键帧密度加权（场景切换密集区多采）。
+    # TRACE_VIDEO_SEEK=0 回退场景模式。
 VIDEO_SCENE_MODE = os.environ.get("TRACE_VIDEO_SCENE", "1") != "0"
     # 场景模式（seek 关闭时的回退）：skip_frame=NONKEY 只解码关键帧
-    # + aHash 场景检测 + 超上限等距抽稀。几小时视频抽 N 个代表镜头，
-    # 静止/缓变画面零嵌入成本。TRACE_VIDEO_SCENE=0 再回退 tick 均匀采样。
+    # + aHash 场景检测 + 超上限等距抽稀。TRACE_VIDEO_SCENE=0 再回退 tick 均匀采样。
 VIDEO_SCENE_MAX_SLICES = int(os.environ.get("TRACE_VIDEO_SCENE_MAX", "5"))
-    # 场景模式产出帧数上限（含首尾帧等距抽稀）；用户口径（2026-10-17）：
-    # 任意视频只留 5 帧代表镜头，覆盖场景即可，不求帧全
+    # 场景模式产出帧数上限（回退模式专用）
+# ---- 视频帧数自适应（2026-10-18 v2）：N = clamp(ceil(dur/SPAN), MIN, MAX) ----
+VIDEO_MAX_SLICES = int(os.environ.get("TRACE_VIDEO_MAX_SLICES", "12"))
+    # 帧数上限（原"固定 5 帧"改为自适应：短视频 ≥5 帧，2h ≈8 帧，超长 ≤12）
+VIDEO_MIN_SLICES = 5
+VIDEO_SLICE_SPAN_SEC = float(os.environ.get("TRACE_VIDEO_SPAN", "900"))
+    # 每 15 分钟一帧；2h → 8 帧
+VIDEO_KEYFRAME_WEIGHT = os.environ.get("TRACE_VIDEO_KF_WEIGHT", "1") != "0"
+    # 关键帧密度加权：demux 只读关键帧时间戳（不解码，秒级），编码器通常在
+    # 场景切换处插 I 帧 → 用其密度分布把采样点拉向内容变化密集区；
+    # 恒定 GOP 视频密度均匀，自动退化为等距，无副作用。=0 回退纯等距。
 VIDEO_FRAME_MAX_PIXEL = 512    # 抽帧前长边缩到 512（CPU 跑 512 比 1024 快 ~4×，召回损失小）
 VIDEO_AHASH_SIDE = 8          # aHash 边长（DigUp：8×8 = 64 bit）
 VIDEO_AHASH_TOLERANCE = 4     # XOR 后 ≤4 bit 差异视为重复帧（DigUp 口径）
@@ -109,29 +122,46 @@ WATCH_INTERVAL_SEC = float(os.environ.get("TRACE_WATCH_INTERVAL", "60"))
 WATCH_RESCAN_THRESHOLD = 50   # 变更数超过此值改走整目录增量（比逐文件快）
 
 # ---- 索引指纹（DigUp fingerprint：模型/参数变化 → 索引不可混用，须重建）----
+# v2（2026-10-18）：只含"算法语义版本"，不含具体帧数/窗数 N——N 由视频时长
+# 自适应决定（VIDEO_SLICE_SPAN_SEC 等），调参只影响新索引文件，不再强制
+# 全库重建。per-file 判定见 indexer（files.extraction 列）。
 _FP_IMG_PREFIX = f"img-pref={IMAGE_INDEX_PREFIX or 'none'}"
 _FP_MODE = (
-    f"seek{VIDEO_SCENE_MAX_SLICES}" if VIDEO_SEEK_MODE
+    ("seek-v2-kfw" if VIDEO_KEYFRAME_WEIGHT else "seek-v2-equi") if VIDEO_SEEK_MODE
     else (f"scene{VIDEO_SCENE_MAX_SLICES}" if VIDEO_SCENE_MODE
           else f"tick{VIDEO_FRAME_INTERVAL_SEC}")
 )
 _FP_FRAME = _FP_MODE + f"/ahash{VIDEO_AHASH_SIDE}/{VIDEO_AHASH_TOLERANCE}/maxpx{VIDEO_FRAME_MAX_PIXEL}"
+_FP_AUDIO = f"audio-v2-rmsfwd{int(AUDIO_SILENCE_FWD_SEC)}/win{AUDIO_WINDOW_SEC}"
 FINGERPRINT = (
     "embeddinggemma-2-onnx-int8"
     "| prompt-title-v1"          # 文档向量带文件名标题
     "| haswords-v1"              # 纯数字文本只进关键词
     f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
     f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}"
-    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip/max{AUDIO_MAX_WINDOWS}"
+    f"| {_FP_AUDIO}"
     f"| {_FP_IMG_PREFIX}"
 )
-FINGERPRINT_WEMM = (
-    "wemm-2b-gguf-q4km"
-    "| prompt-instruct-v1"
-    f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
-    f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}"
-    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip/max{AUDIO_MAX_WINDOWS}"
-)
+
+
+def extraction_fingerprint(kind: str) -> str:
+    """per-file 抽取指纹：该文件切片所依赖的算法/模型版本。
+
+    与全局 FINGERPRINT 的区别：按文件类型裁剪——文本文件不受视频/音频
+    算法升级影响，图片不受音频算法影响。incremental 索引用它逐文件判定
+    是否需要重索（files.extraction != 本值 → 该文件重索）。
+    """
+    core = ("embeddinggemma-2-onnx-int8"
+            "| prompt-title-v1| haswords-v1"
+            f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
+            f"| {_FP_IMG_PREFIX}")
+    if kind in ("video",):
+        return core + f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}| {_FP_AUDIO}"
+    if kind == "audio":
+        return core + f"| {_FP_AUDIO}"
+    if kind == "image":
+        return core + "| ocr-v1"
+    return core
 
 # ---- 索引排除规则（PRD 4.1 隐私硬排除）----
 OCR_ENABLED = True           # 图片/截图 OCR 文字检索（失败自动降级跳过）

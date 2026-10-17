@@ -135,7 +135,8 @@ class IndexTaskManager:
                                                 progress=_progress, cancel=cancel)
                 elif kind == "index_roots":
                     result = {"roots": 0, "scanned": 0, "indexed": 0,
-                              "skipped": 0, "errors": 0, "cancelled": False}
+                              "skipped": 0, "errors": 0, "dedup": 0,
+                              "cancelled": False}
                     for r in (roots or []):
                         if cancel is not None and cancel.is_set():
                             result["cancelled"] = True
@@ -145,7 +146,7 @@ class IndexTaskManager:
                         sub = indexer.index_root(r, full=full,
                                                  progress=_progress, cancel=cancel)
                         result["roots"] += 1
-                        for k in ("scanned", "indexed", "skipped", "errors"):
+                        for k in ("scanned", "indexed", "skipped", "errors", "dedup"):
                             result[k] += sub.get(k, 0)
                         if sub.get("cancelled"):
                             result["cancelled"] = True
@@ -156,12 +157,13 @@ class IndexTaskManager:
                 with self._lock:
                     status_ref["result"] = result
                     status_ref["progress"] = result
-                log.info("后台索引完成 kind=%s root=%s by=%s：扫描 %d 索引 %d 跳过 %d 错误 %d 用时 %.1fs",
+                log.info("后台索引完成 kind=%s root=%s by=%s：扫描 %d 索引 %d 去重 %d 跳过 %d 错误 %d 用时 %.1fs",
                          kind,
                          f"{len(roots)} roots" if roots else (root or f"{len(paths or [])} paths"),
                          by,
                          result.get("scanned", 0), result.get("indexed", 0),
-                         result.get("skipped", 0), result.get("errors", 0),
+                         result.get("dedup", 0), result.get("skipped", 0),
+                         result.get("errors", 0),
                          result.get("seconds", 0.0))
             except Exception as e:
                 log.exception("后台索引失败")

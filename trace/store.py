@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS files (
     file_type   TEXT NOT NULL,          -- pdf / image / audio / video / text / code
     modality    TEXT NOT NULL,          -- 实际索引模态
     status      TEXT NOT NULL DEFAULT 'indexed',
-    indexed_at  TEXT NOT NULL
+    indexed_at  TEXT NOT NULL,
+    extraction  TEXT,                   -- 该文件索引时的抽取算法指纹（per-file 增量判定）
+    content_hash TEXT                   -- 头尾部分哈希（同内容多路径去重）
 );
 CREATE TABLE IF NOT EXISTS slices (
     slice_id     INTEGER PRIMARY KEY,
@@ -62,6 +64,7 @@ CREATE TABLE IF NOT EXISTS roots (
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_slices_file ON slices(file_id);
+
 """
 
 SCHEMA_VEC = """
@@ -112,6 +115,7 @@ class Store:
         sqlite_vec.load(self.db)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate_columns()
         self.db.execute("PRAGMA foreign_keys = ON")
         # WAL：索引期读写并发不互斥（DigUp 同款：journal_mode=WAL + synchronous=NORMAL）
         self.db.execute("PRAGMA journal_mode = WAL")
@@ -142,6 +146,19 @@ class Store:
                 self.db.execute(
                     "UPDATE files SET file_type=? WHERE file_type=?", (kind, ext))
                 log.info("迁移 file_type: %s -> %s", ext, kind)
+        self.db.commit()
+
+    def _migrate_columns(self) -> None:
+        """老库补列（executescript 的 CREATE IF NOT EXISTS 不会给已有表加列）。"""
+        for col in ("extraction", "content_hash"):
+            try:
+                self.db.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
+                log.info("files 表补列：%s", col)
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+        # hash 索引须在补列之后建（SCHEMA 里建会在老库上报 no such column）
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash)")
         self.db.commit()
 
     # ------------------------------------------------------------------ #
@@ -269,7 +286,9 @@ class Store:
         return out
 
     def upsert_file(self, path: str, size: int, mtime: float, file_type: str,
-                    modality: str, status: str) -> int:
+                    modality: str, status: str,
+                    extraction: str | None = None,
+                    content_hash: str | None = None) -> int:
         """插入或更新文件记录，返回 file_id。
 
         两步走（先 SELECT 后 INSERT/UPDATE）：ON CONFLICT DO UPDATE 的
@@ -279,19 +298,83 @@ class Store:
             row = self.db.execute("SELECT file_id FROM files WHERE path=?", (path,)).fetchone()
             if row:
                 self.db.execute(
-                    """UPDATE files SET name=?, size=?, mtime=?, file_type=?, modality=?, status=?, indexed_at=?
-                       WHERE file_id=?""",
-                    (Path(path).name, size, mtime, file_type, modality, status, _now(), row["file_id"]),
+                    """UPDATE files SET name=?, size=?, mtime=?, file_type=?, modality=?, status=?, indexed_at=?,
+                       extraction=?, content_hash=? WHERE file_id=?""",
+                    (Path(path).name, size, mtime, file_type, modality, status, _now(),
+                     extraction, content_hash, row["file_id"]),
                 )
                 self._commit()
                 return row["file_id"]
             cur = self.db.execute(
-                """INSERT INTO files(path, name, size, mtime, file_type, modality, status, indexed_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (path, Path(path).name, size, mtime, file_type, modality, status, _now()),
+                """INSERT INTO files(path, name, size, mtime, file_type, modality, status, indexed_at,
+                                     extraction, content_hash)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (path, Path(path).name, size, mtime, file_type, modality, status, _now(),
+                 extraction, content_hash),
             )
             self._commit()
             return cur.lastrowid
+
+    def find_file_by_hash(self, content_hash: str, exclude_path: str,
+                          file_type: str | None = None) -> sqlite3.Row | None:
+        """按内容哈希找已完整索引的源文件（去重复用切片）。
+
+        file_type 过滤：同字节不同扩展名（.mp4/.avi）classify 成不同 kind，
+        跨 kind 克隆会把视频帧切片挂到音频文件上，必须同类型才复用。
+        """
+        with self._lock:
+            sql = """SELECT * FROM files
+                     WHERE content_hash=? AND path<>? AND status='indexed'
+                       AND extraction IS NOT NULL"""
+            args: list = [content_hash, exclude_path]
+            if file_type:
+                sql += " AND file_type=?"
+                args.append(file_type)
+            sql += " ORDER BY file_id LIMIT 1"
+            return self.db.execute(sql, args).fetchone()
+
+    def clone_slices(self, src_file_id: int, dst_file_id: int,
+                     rename: tuple[str, str] | None = None) -> int:
+        """把源文件的切片（含向量 BLOB/vec_index/FTS）复制到目标文件。
+
+        同内容多路径去重：不重复跑抽取+嵌入，直接复用向量。
+        rename=(源文件 stem, 目标文件 stem)：text/keywords 中出现源名处
+        替换为目标名（向量/位置不变），保证文件名关键词可命中本路径。
+        返回复制条数。
+        """
+        import sqlite_vec
+        with self._lock:
+            self._invalidate_cache()
+            rows = self.db.execute(
+                """SELECT modality, location, text_snippet, keywords, vector
+                   FROM slices WHERE file_id=? ORDER BY slice_id""", (src_file_id,)
+            ).fetchall()
+            if not rows:
+                return 0
+            n = 0
+            for r in rows:
+                text, kw = r["text_snippet"], r["keywords"]
+                if rename and rename[0]:
+                    text = text.replace(rename[0], rename[1])
+                    kw = kw.replace(rename[0], rename[1])
+                cur = self.db.execute(
+                    "INSERT INTO slices(file_id, modality, location, text_snippet, keywords, vector) VALUES (?,?,?,?,?,?)",
+                    (dst_file_id, r["modality"], r["location"], text, kw, r["vector"]),
+                )
+                sid = cur.lastrowid
+                if r["vector"] is not None and self._vec_ok:
+                    try:
+                        self.db.execute(
+                            "INSERT INTO vec_index(slice_id, embedding) VALUES (?,?)",
+                            (sid, r["vector"]))
+                    except sqlite3.Error:
+                        self._vec_ok = False
+                self.db.execute(
+                    "INSERT INTO slices_fts(rowid, text_snippet, keywords) VALUES (?,?,?)",
+                    (sid, text, kw))
+                n += 1
+            self._commit()
+            return n
 
     def replace_slices(self, file_id: int, slices: list[dict]) -> None:
         """整文件重建切片：先删旧（FTS 自管表按 rowid 删 + vec），再插新。
