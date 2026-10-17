@@ -23,30 +23,14 @@ impl BackendState {
     }
 }
 
-/// 查找 venv Python 可执行文件。从 exe 所在目录向上爬，找最近的 .venv。
-fn find_python() -> PathBuf {
-    if let Ok(env) = std::env::var("TRACE_PYTHON") {
-        let p = PathBuf::from(env);
-        if p.exists() { return p; }
-    }
-    let exe = std::env::current_exe().expect("current_exe");
-    let mut root = exe.parent().map(|p| p.to_path_buf()).unwrap_or(exe);
-    for _ in 0..10 {
-        for cand in [
-            root.join(".venv").join("Scripts").join("python.exe"),
-            root.join(".venv").join("bin").join("python"),
-        ] {
-            if cand.exists() { return cand; }
-        }
-        if let Some(p) = root.parent() { root = p.to_path_buf(); } else { break; }
-    }
-    // fallback：PATH 上的 python
-    PathBuf::from(if cfg!(target_os = "windows") { "python" } else { "python3" })
-}
 
 /// 从 exe 路径向上爬，找到含 trace/ 包的项目根（放 trace.db / models 的目录）。
 fn project_root() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
+    // release（安装版）：资源就在 exe 同级（trace-sidecar\ models\），安装目录即根
+    if !cfg!(debug_assertions) {
+        return exe.parent().map(|p| p.to_path_buf()).unwrap_or(exe);
+    }
     let mut root = exe.parent().map(|p| p.to_path_buf()).unwrap_or(exe);
     for _ in 0..10 {
         // 探测：目录下存在 trace 包 + trace.db → 命中
@@ -62,6 +46,37 @@ fn project_root() -> PathBuf {
         return PathBuf::from(env);
     }
     PathBuf::from(".")
+}
+
+/// 解析 sidecar 启动命令：优先安装包内置的 PyInstaller 产物，
+/// dev 环境回退到 .venv 的 python + webserver.py。
+/// 返回 (程序, 额外参数前缀)。
+fn find_sidecar() -> (PathBuf, Vec<String>) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or(exe);
+    // 安装版布局：<install>\trace-sidecar\trace-sidecar.exe
+    let bundled = exe_dir.join("trace-sidecar").join("trace-sidecar.exe");
+    if !cfg!(debug_assertions) && bundled.exists() {
+        return (bundled, Vec::new());
+    }
+    // dev：找 .venv python（向上爬）
+    if let Ok(env) = std::env::var("TRACE_PYTHON") {
+        let p = PathBuf::from(env);
+        if p.exists() { return (p, vec!["webserver.py".into()]); }
+    }
+    let mut root = exe_dir.clone();
+    for _ in 0..10 {
+        for cand in [
+            root.join(".venv").join("Scripts").join("python.exe"),
+            root.join(".venv").join("bin").join("python"),
+        ] {
+            if cand.exists() { return (cand, vec!["webserver.py".into()]); }
+        }
+        if let Some(p) = root.parent() { root = p.to_path_buf(); } else { break; }
+    }
+    // fallback：PATH 上的 python
+    (PathBuf::from(if cfg!(target_os = "windows") { "python" } else { "python3" }),
+     vec!["webserver.py".into()])
 }
 
 #[tauri::command]
@@ -158,15 +173,20 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
 pub fn run() {
     let backend = Arc::new(BackendState::new());
 
-    // 启动 Python 边车：跑根目录的 webserver.py（不用 -m 避免 stdlib `trace` 撞名）
+    // 启动边车：安装版为 PyInstaller 产物 trace-sidecar.exe；dev 为 .venv python webserver.py
     let proj = project_root();
-    // GUI 子系统下 spawn console 程序（python.exe）必须 CREATE_NO_WINDOW，否则弹控制台
+    let (sidecar_prog, mut sidecar_args) = find_sidecar();
+    sidecar_args.push("--port".into());
+    sidecar_args.push("0".into());
+    // GUI 子系统下 spawn console 程序必须 CREATE_NO_WINDOW，否则弹控制台
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut sidecar_cmd = Command::new(find_python());
+    let mut sidecar_cmd = Command::new(sidecar_prog);
     sidecar_cmd
-        .args(["webserver.py", "--port", "0"])
+        .args(&sidecar_args)
         .current_dir(&proj)
+        // 安装版：config.py 经此变量定位 models / trace.db（源码在 PyInstaller 包内，__file__ 不可用）
+        .env("TRACE_PROJECT_ROOT", &proj)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]

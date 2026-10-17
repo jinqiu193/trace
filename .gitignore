@@ -45,3 +45,9 @@ Thumbs.db
 .DS_Store
 dev_restart.bat
 sidecar.log
+
+.sidecar-build-cache/
+.venv-build/
+sysinstall/
+_build_test_*.log
+sidecar-dist/
