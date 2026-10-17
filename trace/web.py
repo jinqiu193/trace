@@ -352,16 +352,17 @@ def delete_file(path: str) -> dict:
 
 
 @app.post("/api/reindex")
-def reindex_all() -> dict:
+def reindex_all(full: bool = False) -> dict:
     s = _state()
     roots = s.store.list_roots()
     if not roots:
         return {"results": []}
-    # 逐个排队跑：start_root 单任务模型，这里直接起第一个并告知总量
-    started = s.tasks.start_root(roots[0], full=True, by="user")
+    # 逐个排队跑：start_root 单任务模型，这里直接起第一个并告知总量。
+    # 默认增量（指纹跳过已索引文件，秒级）；full=True 才全量重嵌（慢，慎用）
+    started = s.tasks.start_root(roots[0], full=full, by="user")
     if not started:
         raise HTTPException(409, "an index task is already running")
-    return {"ok": True, "queued": len(roots), "first": roots[0],
+    return {"ok": True, "queued": len(roots), "first": roots[0], "full": full,
             "task": s.tasks.brief()}
 
 

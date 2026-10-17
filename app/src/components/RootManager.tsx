@@ -93,18 +93,19 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
     }
   };
 
-  const reindexAll = async () => {
+  const reindexAll = async (full = false) => {
     if (roots.length === 0) return;
+    if (full && !confirm("全量重建会重新嵌入所有文件（大视频/音频可能要很久）。\n通常只需「刷新」即可同步新增/修改的文件。确定全量重建？")) return;
     setBusy(true);
     try {
-      await api.reindexAll();   // 后台任务，立即返回（watcher 自动任务会被抢占）
+      await api.reindexAll(full);   // 后台任务，立即返回（watcher 自动任务会被抢占）
       onChanged?.();
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       if (msg.includes("409")) {
         alert("已有索引任务进行中，请等它完成，或先点「取消任务」再重建。");
       } else {
-        alert("全量重建失败：" + msg);
+        alert((full ? "全量重建失败：" : "刷新失败：") + msg);
       }
     } finally {
       setBusy(false);
@@ -121,7 +122,10 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
         <span>索引范围</span>
         <div>
           <button className="btn-sm" onClick={addRoot} disabled={busy}><IconPlus size={12} /> 添加</button>
-          <button className="btn-sm" onClick={reindexAll} disabled={busy || roots.length === 0}><IconRefresh size={12} /> 重建</button>
+          <button className="btn-sm" onClick={() => reindexAll(false)} disabled={busy || roots.length === 0}
+            title="增量同步：只索引新增/修改的文件（秒级）"><IconRefresh size={12} /> 刷新</button>
+          <button className="btn-sm" onClick={() => reindexAll(true)} disabled={busy || roots.length === 0}
+            title="全量重建：所有文件重新切片+嵌入（慢，一般不需要）">全量重建</button>
         </div>
       </div>
       <div className="root-list">
@@ -149,6 +153,7 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
                       {p?.errors ? ` ⚠${p.errors}` : ""}
                       {task?.by === "watcher" ? " · 自动同步" : ""}
                       {task?.kind === "index_paths" ? " · 定向增量" : ""}
+                      {p?.current ? ` · ${p.current.split(/[\\/]/).pop()}` : ""}
                     </span>
                   </div>
                 ) : err ? (
@@ -163,7 +168,7 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
               </div>
               {isRunning
                 ? <button className="btn-xs" title="取消索引" onClick={cancelTask}><IconStop size={12} /></button>
-                : <button className="btn-xs" title="重新索引" onClick={() => indexPath(path)} disabled={busy}><IconRefresh size={12} /></button>}
+                : <button className="btn-xs" title="增量同步此目录（只索引新增/修改的文件）" onClick={() => indexPath(path)} disabled={busy}><IconRefresh size={12} /></button>}
               <button className="btn-xs" title="从索引移除" onClick={() => removeRoot(path)} disabled={busy}><IconTrash size={12} /></button>
             </div>
           );
