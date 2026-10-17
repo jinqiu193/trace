@@ -166,26 +166,7 @@ select:focus-visible {
     rgba(158, 148, 196, 0.24) 45%, transparent 78%);
   pointer-events: none;
 }
-.menubar-logo {
-  width: 20px; height: 20px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, #6b78b8, #8d86c4);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  box-shadow: 0 0 12px rgba(107, 120, 184, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-.menubar-title {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  background: linear-gradient(120deg, #f0f2f7 30%, #b7c1ee 90%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.menubar-sub { color: var(--fg-3); font-size: 11px; margin-left: 2px; }
+
 .menubar-spacer { flex: 1; }
 /* 标题栏操作区与帮助/设置按钮之间的分隔 */
 .menubar-sep {

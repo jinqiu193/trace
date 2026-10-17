@@ -7,7 +7,7 @@ import { ImagePreview } from "./components/ImagePreview";
 import { FilePreview } from "./components/FilePreview";
 import { SettingsModal } from "./components/SettingsModal";
 import { ShortcutHelp } from "./components/ShortcutHelp";
-import { IconSearch, IconSettings, IconKeyboard, IconList, IconGrid } from "./icons";
+import { IconSettings, IconKeyboard, IconList, IconGrid } from "./icons";
 import type { VideoHit, SearchMode, SortKey } from "./api";
 
 const SORTS: { key: SortKey; label: string }[] = [
@@ -47,8 +47,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="menubar">
-        <span className="menubar-logo"><IconSearch size={12} /></span>
-        <span className="menubar-title">Trace</span>
+
         <span className="menubar-spacer" />
         <div className="mode-seg" role="group" aria-label="检索模式">
           <button
