@@ -62,7 +62,10 @@ export function VideoPreview({ path, location, hits, onClose }: VideoPreviewProp
       .catch(() => { /* 元信息拿不到也能播，只是没有全片时间轴 */ });
   }, [baseUrl, path]);
 
-  // ---- 视频模式：ffmpeg 流（WebM/VP9）从 segT 起播，播完自动续下一段 ----
+  // ---- 视频模式：ffmpeg 流（fMP4，H.264 remux 或转码）从 segT 起播，播完自动续下一段 ----
+  // onError 降级到帧序列；帧序列里可点「重试播放」回来（比如后端刚装好 ffmpeg）
+  const retryVideo = () => setMode("video");
+
   useEffect(() => {
     if (mode !== "video") return;
     const v = videoRef.current;
@@ -131,7 +134,7 @@ export function VideoPreview({ path, location, hits, onClose }: VideoPreviewProp
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, mode, posT, seekTo]);
 
-  // 视频 src：后端 ffmpeg 流（WebM/VP9），t 随时间轴点击变化
+  // 视频 src：后端 ffmpeg 流（fMP4），t 随时间轴点击变化
   const streamUrl = `${baseUrl}/api/video/stream?path=${encodeURIComponent(path)}&t=${segT.toFixed(2)}&dur=${SEG_S}`;
 
   const pct = (t: number) => (duration > 0 ? Math.min(100, Math.max(0, (t / duration) * 100)) : 0);
@@ -199,7 +202,7 @@ export function VideoPreview({ path, location, hits, onClose }: VideoPreviewProp
             {mode === "frames" && (
               <div className="video-preview-fallback">
                 <div className="video-preview-fallback-note">
-                  流式播放失败（ffmpeg 异常？），已切到帧预览<br />
+                  流式播放失败，已切到帧预览<br />
                   <span>命中点前后 {FRAME_FALLBACK_SPAN_S}s 共 {FRAME_FALLBACK_COUNT} 帧</span>
                 </div>
                 <img
@@ -219,6 +222,7 @@ export function VideoPreview({ path, location, hits, onClose }: VideoPreviewProp
                 <div className="video-preview-frame-time">
                   {frameT(frameIdx).toFixed(1)}s（{frameIdx + 1}/{FRAME_FALLBACK_COUNT}）
                 </div>
+                <button className="btn-sm" onClick={retryVideo}>▶ 重试播放</button>
               </div>
             )}
             {mode === "error" && <div className="video-preview-err">视频打开失败（文件被占用或已移动？）</div>}

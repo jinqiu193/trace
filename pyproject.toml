@@ -20,6 +20,7 @@ dependencies = [
     "opencv-python",
     "av",
     "scipy",
+    "imageio-ffmpeg",        # 视频流播放：自带 ffmpeg 二进制（remux/转码 H.264）
     # 边车
     "fastapi",
     "uvicorn[standard]",

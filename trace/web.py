@@ -358,18 +358,25 @@ def open_file(path: str, page: Optional[int] = None) -> dict:
 
 
 # --------------------------------------------------------------------- #
-# 视频流：ffmpeg 从指定时间点剪切 + 转 WebM(VP9) 边转边发给 WebView2
-# WebView2 原生 <video> 对 WebM/VP9 100% 支持，绕过 H.264 解码限制
+# 视频流：ffmpeg 从指定时间点剪切后流式发给 WebView2
+# - H.264 源：直接 remux（-c:v copy），毫秒级首帧、零转码开销
+# - 其他编码：libx264 veryfast 转码（比 VP9 软编快数倍，兼容性最好）
+# 输出 fragmented MP4：边转边发，<video> 无需下载完即可起播
 # --------------------------------------------------------------------- #
 def _find_ffmpeg() -> str:
-    """定位 ffmpeg 可执行文件。优先级：PATH > 项目 bundled。"""
+    """定位 ffmpeg 可执行文件。优先级：PATH > 项目 bundled > imageio-ffmpeg 包。"""
     p = shutil.which("ffmpeg")
     if p:
         return p
     cand = Path(__file__).parent.parent / "tools" / "ffmpeg.exe"
     if cand.exists():
         return str(cand)
-    raise HTTPException(500, "ffmpeg not found; install ffmpeg or place ffmpeg.exe in PATH")
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    raise HTTPException(500, "ffmpeg not found; install ffmpeg / imageio-ffmpeg, or place ffmpeg.exe in PATH")
 
 
 @app.get("/api/video/info")
@@ -500,9 +507,30 @@ def video_frame(path: str, t: float = 0.0, max_w: int = 640) -> "StreamingRespon
 _STREAM_CHUNK = 64 * 1024
 
 
+def _video_codec_fourcc(path: Path) -> str:
+    """cv2 快速读视频轨 fourcc（avc1/h264…）。打不开返回空串（走转码分支）。"""
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return ""
+    try:
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        return "".join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip("\x00").lower()
+    finally:
+        cap.release()
+
+
+# H.264 的 fourcc 变体（MP4 里是 avc1/avc3；mkv/avi 里常见 h264/x264）
+_H264_FOURCCS = {"avc1", "avc3", "h264", "x264", "davc"}
+
+
 @app.get("/api/video/stream")
 def video_stream(path: str, t: float = 0.0, dur: float = 60.0) -> StreamingResponse:
-    """从指定时间点开始剪切 + 转 WebM/VP9 边转边发，WebView2 <video> 直接 src 就能播。"""
+    """从指定时间点起剪切 dur 秒，fragmented MP4 边发边播。
+
+    H.264 源直接 remux（CPU 几乎为零、首帧毫秒级）；其他编码（HEVC/VP9/AV1…）
+    用 libx264 veryfast 转码。音频统一转 AAC（MP4 容器兼容性最好）。
+    """
     p = Path(path)
     if not p.exists():
         raise HTTPException(404, f"file missing: {path}")
@@ -510,17 +538,24 @@ def video_stream(path: str, t: float = 0.0, dur: float = 60.0) -> StreamingRespo
         raise HTTPException(400, f"bad t/dur: t={t} dur={dur}")
 
     ffmpeg = _find_ffmpeg()
-    # -ss 在 -i 之前：快速定位到最近关键帧（牺牲 ±1s 精度，换秒开）；-t 截取长度
-    # VP9 软编码在 720p 实时 ~25fps，单核负载 ~70%，不会卡其他搜索
+    is_h264 = _video_codec_fourcc(p) in _H264_FOURCCS
+    # -ss 在 -i 之前：快速定位（remux 时对齐到最近关键帧，误差 ≤ 一个 GOP）
+    if is_h264:
+        vcodec = ["-c:v", "copy", "-avoid_negative_ts", "make_zero"]
+    else:
+        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                  "-pix_fmt", "yuv420p"]
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-ss", f"{max(0.0, t):.3f}",
         "-i", str(p),
         "-t", f"{dur:.3f}",
-        "-c:v", "libvpx-vp9", "-b:v", "800k", "-deadline", "realtime", "-cpu-used", "5",
-        "-c:a", "libopus", "-b:a", "64k",
-        "-f", "webm", "-",
+        *vcodec,
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "-",
     ]
+    log.info("video_stream %s remux=%s", p.name, is_h264)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 bufsize=_STREAM_CHUNK * 2)
@@ -542,7 +577,7 @@ def video_stream(path: str, t: float = 0.0, dur: float = 60.0) -> StreamingRespo
 
     return StreamingResponse(
         iter_chunks(),
-        media_type="video/webm",
+        media_type="video/mp4",
         headers={
             "Cache-Control": "no-store",
             "Accept-Ranges": "none",
