@@ -97,12 +97,12 @@ select:focus-visible {
 
 .app {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: 1fr;
   grid-template-rows: auto 1fr auto;
   grid-template-areas:
-    "menu menu"
-    "side main"
-    "stat stat";
+    "menu"
+    "main"
+    "stat";
   height: 100vh;
 }
 
@@ -172,17 +172,6 @@ select:focus-visible {
 }
 .menubar-btn kbd { margin-left: 2px; }
 
-/* ---- 侧栏 ---- */
-.sidebar {
-  grid-area: side;
-  background: var(--bg-2);
-  border-right: 1px solid var(--border);
-  padding: 14px 12px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
 
 .main {
   grid-area: main;
@@ -486,11 +475,13 @@ select:focus-visible {
   background: rgba(248, 113, 113, 0.1);
 }
 
-/* ---- 工具行（模式标签 / 排序 / 视图切换） ---- */
+/* ---- 工具行（类型筛选 / 目录 / 相似度 / 排序 / 视图切换） ---- */
 .search-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  row-gap: 6px;
   margin: 0 0 12px;
   animation: fadeIn 0.15s;
 }
@@ -506,6 +497,91 @@ select:focus-visible {
   padding: 3px 10px;
   border-radius: 999px;
 }
+.toolbar-types { display: flex; gap: 3px; flex-wrap: wrap; }
+.type-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  color: var(--fg-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.type-btn:hover { color: var(--fg); border-color: var(--border-2); }
+.type-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  border-color: var(--accent);
+}
+.type-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.type-count {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg-3);
+  border-radius: 999px;
+  padding: 0 5px;
+  font-size: 9px;
+  font-family: var(--mono);
+  line-height: 14px;
+}
+.type-btn.active .type-count {
+  background: rgba(10, 10, 15, 0.3);
+  color: #c3c6f5;
+}
+.dir-input {
+  width: 128px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.dir-input::placeholder { color: var(--fg-3); font-family: inherit; }
+.dir-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.thr-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.thr-label { font-size: 11px; color: var(--fg-3); }
+.thr-wrap input[type="range"] {
+  width: 72px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.threshold-val {
+  width: 28px;
+  text-align: right;
+  font-family: var(--mono);
+  color: var(--fg-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.filters-reset {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 5px;
+}
+.filters-reset:hover { color: var(--accent-2); border-color: var(--accent); }
 .sort-label { font-size: 11px; color: var(--fg-3); }
 .sort-select {
   background: var(--bg-2);
@@ -962,123 +1038,7 @@ select:focus-visible {
 .grid-meta .mlt-btn { padding: 1px 6px; margin-left: auto; }
 
 /* =====================================================================
-   侧栏筛选器
-   ===================================================================== */
 
-.filters {
-  background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
-  font-size: 11px;
-}
-.filters-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-.filters-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--fg-2);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-.filters-reset {
-  background: transparent;
-  border: none;
-  color: var(--fg-3);
-  cursor: pointer;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.filters-reset:hover { color: var(--accent-2); background: var(--bg-hover); }
-
-.filter-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.filter-row:last-child { margin-bottom: 0; }
-.filter-row label {
-  width: 64px;
-  color: var(--fg-2);
-  font-weight: 500;
-  flex-shrink: 0;
-}
-.filter-row input[type="text"], .filter-row input:not([type]) {
-  flex: 1;
-  min-width: 0;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--fg);
-  padding: 5px 8px;
-  font-size: 11px;
-  font-family: var(--mono);
-}
-.filter-row input[type="text"]:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-.filter-row input[type="range"] {
-  flex: 1;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-.threshold-val {
-  width: 32px;
-  text-align: right;
-  font-family: var(--mono);
-  color: var(--fg-2);
-  font-variant-numeric: tabular-nums;
-}
-.type-buttons { display: flex; gap: 4px; flex-wrap: wrap; }
-.type-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  background: transparent;
-  color: var(--fg-3);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 3px 7px;
-  font-size: 10px;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-.type-btn:hover { color: var(--fg); border-color: var(--border-2); }
-.type-btn.active {
-  background: var(--accent-soft);
-  color: var(--accent-2);
-  border-color: var(--accent);
-}
-.type-dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  opacity: 0.9;
-}
-.type-count {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--fg-3);
-  border-radius: 999px;
-  padding: 0 5px;
-  font-size: 9px;
-  font-family: var(--mono);
-  line-height: 14px;
-}
-.type-btn.active .type-count {
-  background: rgba(10, 10, 15, 0.3);
-  color: #c3c6f5;
-}
-.result-count { font-family: var(--mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
-
-/* =====================================================================
    RootManager（设置弹窗内）
    ===================================================================== */
 

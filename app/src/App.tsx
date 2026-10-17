@@ -2,7 +2,6 @@ import { useState } from "react";
 import { SearchPanel, ImageSibling } from "./components/SearchPanel";
 import { RootManager } from "./components/RootManager";
 import { StatusBar } from "./components/StatusBar";
-import { Filters } from "./components/Filters";
 import { VideoPreview } from "./components/VideoPreview";
 import { ImagePreview } from "./components/ImagePreview";
 import { SettingsModal } from "./components/SettingsModal";
@@ -12,11 +11,6 @@ import type { VideoHit } from "./api";
 
 export default function App() {
   const [statusTick, setStatusTick] = useState(0);
-  const [fileType, setFileType] = useState("");
-  const [dir, setDir] = useState("");
-  const [threshold, setThreshold] = useState(0);
-  const [resultCount, setResultCount] = useState(0);
-  const [facets, setFacets] = useState<Record<string, number>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [videoPreview, setVideoPreview] = useState<{ path: string; location: string; hits?: VideoHit[] } | null>(null);
@@ -49,27 +43,10 @@ export default function App() {
           设置
         </button>
       </header>
-      <aside className="sidebar">
-        <Filters
-          fileType={fileType}
-          setFileType={setFileType}
-          dir={dir}
-          setDir={setDir}
-          threshold={threshold}
-          setThreshold={setThreshold}
-          resultCount={resultCount}
-          facets={facets}
-        />
-      </aside>
       <main className="main">
         <SearchPanel
-          fileType={fileType}
-          dir={dir}
-          threshold={threshold}
           onPlayVideo={(path, location, hits) => setVideoPreview({ path, location, hits })}
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
-          onResultCount={setResultCount}
-          onFacets={setFacets}
           onShowHelp={() => setHelpOpen(true)}
         />
       </main>

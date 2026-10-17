@@ -18,6 +18,8 @@ const TYPE_LABELS: Record<string, string> = {
   image: "图片", pdf: "PDF", text: "文本", code: "代码", audio: "音频", video: "视频",
 };
 
+const FILTER_TYPES = ["text", "pdf", "image", "code", "audio", "video"] as const;
+
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "relevance", label: "相关度" },
   { key: "mtime_desc", label: "时间 新→旧" },
@@ -82,17 +84,12 @@ export interface ImageSibling {
 }
 
 export interface SearchPanelProps {
-  fileType?: string;
-  dir?: string;
-  threshold?: number;
   onPlayVideo?: (path: string, location: string, hits?: VideoHit[]) => void;
   onPreviewImage?: (path: string, siblings: ImageSibling[]) => void;
-  onResultCount?: (n: number) => void;
-  onFacets?: (f: Record<string, number>) => void;
   onShowHelp?: () => void;
 }
 
-export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewImage, onResultCount, onFacets, onShowHelp }: SearchPanelProps = {}) {
+export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchPanelProps = {}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -110,6 +107,11 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
   const selRef = useRef<HTMLDivElement | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
+  // 筛选（工具栏内联，与排序同级）
+  const [fileType, setFileType] = useState("");
+  const [dir, setDir] = useState("");
+  const [threshold, setThreshold] = useState(0);
+
   // 以图搜图状态
   const [imgFile, setImgFile] = useState<File | null>(null);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
@@ -126,9 +128,6 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  useEffect(() => { onResultCount?.(results.length); }, [results]);
-
-  useEffect(() => { onFacets?.(facets); }, [facets]);
 
   // 键盘选中项滚动跟随（在视口边缘时平滑滚入）
   useEffect(() => {
@@ -605,6 +604,51 @@ export function SearchPanel({ fileType, dir, threshold, onPlayVideo, onPreviewIm
                 <IconClose size={11} />
               </button>
             </span>
+          )}
+          <div className="toolbar-types">
+            {FILTER_TYPES.map(t => (
+              <button
+                key={t}
+                className={"type-btn" + (fileType === t ? " active" : "")}
+                onClick={() => setFileType(fileType === t ? "" : t)}
+                title={facets && facets[t] > 0 ? `候选池中有 ${facets[t]} 个` : "候选池为空"}
+              >
+                <span className="type-dot" style={{ background: FILE_TYPE_COLORS[t] }} />
+                {TYPE_LABELS[t]}
+                {facets && facets[t] > 0 && (
+                  <span className="type-count">{facets[t]}</span>
+                )}
+              </button>
+            ))}
+          </div>
+          <input
+            className="dir-input"
+            value={dir}
+            onChange={(e) => setDir(e.target.value)}
+            placeholder="目录包含…"
+            spellCheck={false}
+            title="按路径子串过滤结果"
+          />
+          {(imgFile || similarFrom) ? null : (
+            <div className="thr-wrap" title="相似度阈值（z 分），过滤弱匹配">
+              <span className="thr-label">相似度</span>
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={0.1}
+                value={threshold}
+                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+              />
+              <span className="threshold-val">{threshold.toFixed(1)}</span>
+            </div>
+          )}
+          {(fileType !== "" || dir !== "" || threshold > 0) && (
+            <button
+              className="filters-reset"
+              onClick={() => { setFileType(""); setDir(""); setThreshold(0); }}
+              title="清除全部筛选条件"
+            >✕ 重置</button>
           )}
           <span className="toolbar-spacer" />
           <label className="sort-label">排序</label>
