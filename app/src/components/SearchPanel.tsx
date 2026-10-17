@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { api, SearchResult, SortKey, VideoHit } from "../api";
 import {
   IconSearch, IconImage, IconClose, IconSimilar, IconList, IconGrid,
@@ -6,12 +6,12 @@ import {
 } from "../icons";
 
 const FILE_TYPE_COLORS: Record<string, string> = {
-  image: "#c084fc",
-  pdf: "#fb923c",
-  text: "#67e8f9",
-  code: "#a3e635",
-  audio: "#fbbf24",
-  video: "#fb7185",
+  image: "#b2a0d8",
+  pdf: "#cf9d6e",
+  text: "#8fc4cd",
+  code: "#a3bf8e",
+  audio: "#ccb27e",
+  video: "#d094a4",
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -461,7 +461,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
         onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }} />;
     }
     return (
-      <span className="grid-type-badge" style={{ background: FILE_TYPE_COLORS[r.file_type] ?? "#64748b" }}>
+      <span className="grid-type-badge" style={{ "--type-c": FILE_TYPE_COLORS[r.file_type] ?? "#858c9e" } as CSSProperties}>
         {r.file_type}
       </span>
     );
@@ -753,7 +753,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
               )}
               <div className="result-content">
                 <div className="result-row1">
-                  <span className="result-type" style={{ background: FILE_TYPE_COLORS[r.file_type] ?? "#64748b" }}>
+                  <span className="result-type" style={{ "--type-c": FILE_TYPE_COLORS[r.file_type] ?? "#858c9e" } as CSSProperties}>
                     {TYPE_LABELS[r.file_type] ?? r.file_type}
                   </span>
                   <span className="result-name">{r.name}</span>
