@@ -2,6 +2,15 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+[![GitHub Release](https://img.shields.io/github/v/release/jinqiu193/trace)](https://github.com/jinqiu193/trace/releases)
+[![License: MIT](https://img.shields.io/github/license/jinqiu193/trace)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/jinqiu193/trace/total)](https://github.com/jinqiu193/trace/releases)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078d4?logo=windows&logoColor=white)](#quick-start)
+[![Python: 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](#quick-start)
+[![Powered by EmbeddingGemma 2](https://img.shields.io/badge/powered%20by-EmbeddingGemma%202-4285F4)](#)
+[![100% Offline](https://img.shields.io/badge/100%25-offline-2ea44f)](#)
+[![Eval: hit@3 46/46](https://img.shields.io/badge/eval-hit%403%2046%2F46-success)](#benchmarks)
+
 Pick a folder → index it → search its **content** in plain language — text documents, PDFs, images, screenshots and videos, with mixed Chinese/English queries. **100% local, 100% offline.**
 
 Trace is a fully-local semantic search engine for your files, built on Google DeepMind's **[EmbeddingGemma 2](https://developers.googleblog.com/en/embedding-gemma/)** embedding model (int8-quantized ONNX export: 313 MB text model + 195 MB vision encoder). No cloud, no API keys, no data ever leaves your machine.

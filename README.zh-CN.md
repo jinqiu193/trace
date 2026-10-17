@@ -2,6 +2,15 @@
 
 [English](README.md) | **简体中文**
 
+[![GitHub Release](https://img.shields.io/github/v/release/jinqiu193/trace)](https://github.com/jinqiu193/trace/releases)
+[![License: MIT](https://img.shields.io/github/license/jinqiu193/trace)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/jinqiu193/trace/total)](https://github.com/jinqiu193/trace/releases)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078d4?logo=windows&logoColor=white)](#快速开始)
+[![Python: 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](#快速开始)
+[![Powered by EmbeddingGemma 2](https://img.shields.io/badge/powered%20by-EmbeddingGemma%202-4285F4)](#)
+[![100% Offline](https://img.shields.io/badge/100%25-offline-2ea44f)](#)
+[![评测 hit@3 46/46](https://img.shields.io/badge/eval-hit%403%2046%2F46-success)](#实测基准2026-10-14rtx-3070-laptop)
+
 选文件夹 → 索引 → 用自然语言搜**内容**（文本 / PDF / 图片 / 截图 / 视频，中英混合）。**全本地、全离线，数据不出机器。**
 
 Trace 是一个完全本地的文件语义搜索引擎，基于 Google DeepMind 的 **[EmbeddingGemma 2](https://developers.googleblog.com/en/embedding-gemma/)** 嵌入模型（onnx-community int8 ONNX 导出：313MB 文本模型 + 195MB 视觉编码器），通过 ONNX Runtime 本地推理。无需联网、无需 API Key。

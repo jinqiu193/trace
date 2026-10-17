@@ -1,0 +1,67 @@
+name: Bug report / 缺陷反馈
+description: Report a reproducible problem / 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! / 感谢提交缺陷反馈！
+        Please search existing issues first to avoid duplicates. / 请先搜索已有 issue 避免重复。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened / 问题描述
+      description: A clear description of the bug. / 简要描述遇到的问题。
+      placeholder: What did you do, what did you expect, what happened? / 做了什么、期望什么、实际发生了什么？
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 问题模块
+      options:
+        - Desktop app UI / 桌面端界面
+        - Indexing / 索引
+        - Search & ranking / 检索与排序
+        - Image / vision / 图片视觉
+        - Video / 视频
+        - OCR
+        - Installer / 安装包
+        - CLI
+        - Other / 其他
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Trace version / 版本
+      placeholder: e.g. v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 环境
+      description: Windows version, GPU model, CUDA/CPU mode. / Windows 版本、显卡型号、CUDA/CPU 模式。
+      placeholder: |
+        OS: Windows 11 23H2
+        GPU: RTX 3070 Laptop
+        Mode: CUDA / CPU
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output / 日志或报错
+      description: Please copy and paste any relevant log output. / 粘贴相关日志输出。
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checks / 提交前确认
+      options:
+        - label: I searched existing issues and found no duplicate / 已搜索确认无重复 issue
+          required: true
+        - label: I tried `run.py doctor` (CLI users) / 已尝试运行 `run.py doctor`（CLI 用户）
+          required: false
