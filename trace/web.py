@@ -622,8 +622,12 @@ def video_stream(path: str, t: float = 0.0, dur: float = 60.0) -> StreamingRespo
     ]
     log.info("video_stream %s remux=%s", p.name, is_h264)
     try:
+        # GUI 进程树内无控制台可继承，ffmpeg 作为 console 程序会弹新窗口——必须抑制
+        popen_kwargs: dict = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = 0x0800_0000  # CREATE_NO_WINDOW
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                bufsize=_STREAM_CHUNK * 2)
+                                bufsize=_STREAM_CHUNK * 2, **popen_kwargs)
     except FileNotFoundError:
         raise HTTPException(500, "ffmpeg not executable")
 
