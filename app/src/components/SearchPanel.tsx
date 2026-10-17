@@ -28,6 +28,52 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: "name", label: "文件名 A→Z" },
 ];
 
+const DATE_RANGES: { key: string; label: string }[] = [
+  { key: "", label: "任意时间" },
+  { key: "today", label: "今天" },
+  { key: "week", label: "近 7 天" },
+  { key: "month", label: "近 30 天" },
+  { key: "year", label: "近一年" },
+];
+
+const SIZE_RANGES: { key: string; label: string }[] = [
+  { key: "", label: "任意大小" },
+  { key: "lt10", label: "< 10MB" },
+  { key: "10-100", label: "10MB – 100MB" },
+  { key: "100-1024", label: "100MB – 1GB" },
+  { key: "gt1024", label: "> 1GB" },
+];
+
+const MB = 1024 * 1024;
+
+function dateRangeToAfter(r: string): number | undefined {
+  const now = Date.now() / 1000;
+  if (r === "today") return now - 86400;
+  if (r === "week") return now - 7 * 86400;
+  if (r === "month") return now - 30 * 86400;
+  if (r === "year") return now - 365 * 86400;
+  return undefined;
+}
+
+function sizeRangeToPair(r: string): { min?: number; max?: number } {
+  switch (r) {
+    case "lt10": return { max: 10 * MB };
+    case "10-100": return { min: 10 * MB, max: 100 * MB };
+    case "100-1024": return { min: 100 * MB, max: 1024 * MB };
+    case "gt1024": return { min: 1024 * MB };
+    default: return {};
+  }
+}
+
+/** 后端 snippet 的命中词包在 «» 中，渲染成 <mark> */
+function renderSnippet(s: string) {
+  if (!s) return null;
+  const parts = s.split(/«([^»]*)»/);
+  return parts.map((p, i) => (i % 2 === 1
+    ? <mark key={i} className="snippet-mark">{p}</mark>
+    : <span key={i}>{p}</span>));
+}
+
 const HISTORY_KEY = "trace_search_history";
 const HISTORY_MAX = 20;
 const PAGE_SIZE = 20;
@@ -86,10 +132,11 @@ export interface ImageSibling {
 export interface SearchPanelProps {
   onPlayVideo?: (path: string, location: string, hits?: VideoHit[]) => void;
   onPreviewImage?: (path: string, siblings: ImageSibling[]) => void;
+  onPreviewFile?: (path: string, file_type: string, location?: string, query?: string) => void;
   onShowHelp?: () => void;
 }
 
-export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchPanelProps = {}) {
+export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp }: SearchPanelProps = {}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -111,6 +158,8 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
   const [fileType, setFileType] = useState("");
   const [dir, setDir] = useState("");
   const [threshold, setThreshold] = useState(0);
+  const [dateRange, setDateRange] = useState("");    // "" / today / week / month / year
+  const [sizeRange, setSizeRange] = useState("");    // "" / lt10 / 10-100 / 100-1024 / gt1024
 
   // 以图搜图状态
   const [imgFile, setImgFile] = useState<File | null>(null);
@@ -141,7 +190,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
   }, []);
 
   // 视频命中 + 有 location → 走内嵌 HTML5 预览（跳到那一秒）
-  // 图片 → 走内嵌图片预览（带翻页）；其他 → 系统默认应用
+  // 图片 → 内嵌图片预览（带翻页）；音频/文本/PDF → 内嵌 FilePreview；其他 → 系统默认应用
   const handleOpen = (r: SearchResult) => {
     if (r.file_type === "video" && r.location && onPlayVideo) {
       onPlayVideo(r.path, r.location, r.hits);
@@ -152,6 +201,14 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
         .filter(x => x.file_type === "image")
         .map(x => ({ path: x.path, name: x.name }));
       onPreviewImage(r.path, siblings);
+      return;
+    }
+    if ((r.file_type === "audio" || r.file_type === "pdf"
+      || r.file_type === "text" || r.file_type === "code") && onPreviewFile) {
+      const q = query.trim().toLowerCase().startsWith("name:")
+        ? query.trim().slice(5).trim()      // name: 模式高亮文件名词
+        : query.trim();
+      onPreviewFile(r.path, r.file_type, r.location || undefined, q || undefined);
       return;
     }
     api.openPath(r.path, r.location || undefined).catch(err => console.error(err));
@@ -302,12 +359,16 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
     const t = setTimeout(async () => {
       setLoading(true); setError(null);
       try {
+        const sz = sizeRangeToPair(sizeRange);
         const r = await api.search(query, {
           limit,
           sort,
           file_type: fileType || undefined,
           dir: dir || undefined,
           threshold: threshold && threshold > 0 ? threshold : undefined,
+          mtime_after: dateRangeToAfter(dateRange),
+          min_size: sz.min,
+          max_size: sz.max,
         });
         setResults(r.results);
         setMs(r.ms);
@@ -321,7 +382,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
       }
     }, 150);
     return () => clearTimeout(t);
-  }, [similarFrom, imgFile, query, fileType, dir, threshold, limit, sort]);
+  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, sizeRange, limit, sort]);
 
   // 历史记录：查询稳定 2s 后写入（避免打字中间态全部入史）
   useEffect(() => {
@@ -448,6 +509,11 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
   };
 
   const active = !!imgFile || !!similarFrom || !!query.trim();
+  // name: 前缀 → 文件名精确搜索模式（Everything 风格）
+  const isNameMode = !imgFile && !similarFrom
+    && query.trim().toLowerCase().startsWith("name:") && query.trim().length > 5;
+  const hasFilters = fileType !== "" || dir !== "" || threshold > 0
+    || dateRange !== "" || sizeRange !== "";
 
   const renderThumb = (r: SearchResult, maxW: number) => {
     if (r.file_type === "image") {
@@ -566,7 +632,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
           <div className="welcome-title">语义搜索本地文件</div>
           <div className="welcome-sub">
             文字描述、示例图片、甚至视频里的某句话——都能找到<br />
-            中英文混合、拼写偏差也没关系
+            中英文混合、拼写偏差也没关系 · 输入 <kbd className="kbd">name:关键词</kbd> 可直接按文件名精确搜索
           </div>
           <div className="welcome-cards">
             <div className="welcome-card">
@@ -590,6 +656,12 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
 
       {active && (
         <div className="search-toolbar">
+          {isNameMode && (
+            <span className="img-mode-tag name-mode-tag" title="文件名子串精确匹配，不走向量">
+              <IconSearch size={12} />
+              文件名搜索
+            </span>
+          )}
           {imgFile && (
             <span className="img-mode-tag">
               <IconImage size={12} />
@@ -629,7 +701,23 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
             spellCheck={false}
             title="按路径子串过滤结果"
           />
-          {(imgFile || similarFrom) ? null : (
+          <select
+            className={"range-select" + (dateRange ? " active" : "")}
+            value={dateRange}
+            onChange={(e) => setDateRange(e.target.value)}
+            title="按修改时间过滤"
+          >
+            {DATE_RANGES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
+          </select>
+          <select
+            className={"range-select" + (sizeRange ? " active" : "")}
+            value={sizeRange}
+            onChange={(e) => setSizeRange(e.target.value)}
+            title="按文件大小过滤"
+          >
+            {SIZE_RANGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+          {!(imgFile || similarFrom || isNameMode) && (
             <div className="thr-wrap" title="相似度阈值（z 分），过滤弱匹配">
               <span className="thr-label">相似度</span>
               <input
@@ -643,10 +731,10 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
               <span className="threshold-val">{threshold.toFixed(1)}</span>
             </div>
           )}
-          {(fileType !== "" || dir !== "" || threshold > 0) && (
+          {hasFilters && (
             <button
               className="filters-reset"
-              onClick={() => { setFileType(""); setDir(""); setThreshold(0); }}
+              onClick={() => { setFileType(""); setDir(""); setThreshold(0); setDateRange(""); setSizeRange(""); }}
               title="清除全部筛选条件"
             >✕ 重置</button>
           )}
@@ -780,7 +868,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onShowHelp }: SearchP
                     {fmtDate(r.mtime)}{fmtSize(r.size) ? ` · ${fmtSize(r.size)}` : ""}
                   </span>
                 </div>
-                {r.snippet && <div className="result-snippet">{r.snippet}</div>}
+                {r.snippet && <div className="result-snippet">{renderSnippet(r.snippet)}</div>}
                 {r.file_type === "video" && r.nearby_frames && r.nearby_frames.length > 0 && (
                   <div className="frame-strip">
                     {r.nearby_frames.map(f => (

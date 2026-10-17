@@ -200,6 +200,8 @@ def _keyword_channel(store, ts: list[str], ts_fts: list[str]) -> tuple:
 def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
            file_type: str | None = None, dir_filter: str | None = None,
            z_gate: float | None = None, sort: str = "relevance",
+           mtime_after: float | None = None, mtime_before: float | None = None,
+           min_size: int | None = None, max_size: int | None = None,
            with_facets: bool = False) -> list[dict] | tuple[list[dict], dict]:
     """混合语义+关键词检索，返回按融合分排序的文件级结果。
 
@@ -207,6 +209,8 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         z_gate: 语义命中门限（默认 2.0）。前端滑杆 0-10 传过来。
         offset: 分页偏移（与 limit 配合；排序在全量候选上完成后切片）。
         sort: 文件级排序维度（relevance/mtime_desc/mtime_asc/size_desc/name）。
+        mtime_after/before: 修改时间窗口（epoch 秒，含下界不含上界）。
+        min_size/max_size: 文件大小窗口（字节）。
         with_facets: True 时返回 (results, facets)——类型分布计数。
     """
     z_gate = z_gate if z_gate is not None else Z_GATE
@@ -272,6 +276,14 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         if file_type and fr["file_type"] != file_type:
             continue
         if dir_filter and dir_filter.lower() not in fr["path"].lower():
+            continue
+        if mtime_after is not None and (fr["mtime"] or 0) < mtime_after:
+            continue
+        if mtime_before is not None and (fr["mtime"] or 0) >= mtime_before:
+            continue
+        if min_size is not None and (fr["size"] or 0) < min_size:
+            continue
+        if max_size is not None and (fr["size"] or 0) > max_size:
             continue
         z, cos_v, sem_sid = best_sem.get(fid, (0.0, 0.0, None))
         cov = coverage.get(fid, 0.0)
@@ -453,6 +465,75 @@ def search_with_timing(store, embedder, query: str, **kw) -> dict:
             "results": results, "facets": facets}
 
 
+def name_search(store, query: str, limit: int = 20, offset: int = 0,
+                file_type: str | None = None, dir_filter: str | None = None,
+                sort: str = "name",
+                mtime_after: float | None = None, mtime_before: float | None = None,
+                min_size: int | None = None, max_size: int | None = None) -> dict:
+    """`name:` 前缀的纯文件名子串搜索（Everything 风格精确模式）。
+
+    不走向量；大小写不敏感子串匹配；空 `name:` 列出全部文件（浏览模式）。
+    返回与 search_with_timing 同构（前端共用渲染）。
+    """
+    t0 = time.time()
+    q = query.strip()
+    rows = store.search_files_by_name(q) if q else store.search_files_by_name("")
+
+    kept: list[sqlite3.Row] = []
+    facets: dict[str, int] = {}
+    for fr in rows:
+        if file_type and fr["file_type"] != file_type:
+            continue
+        if dir_filter and dir_filter.lower() not in fr["path"].lower():
+            continue
+        if mtime_after is not None and (fr["mtime"] or 0) < mtime_after:
+            continue
+        if mtime_before is not None and (fr["mtime"] or 0) >= mtime_before:
+            continue
+        if min_size is not None and (fr["size"] or 0) < min_size:
+            continue
+        if max_size is not None and (fr["size"] or 0) > max_size:
+            continue
+        kept.append(fr)
+        facets[fr["file_type"]] = facets.get(fr["file_type"], 0) + 1
+
+    # relevance 对文件名搜索无意义，落到 name
+    key = sort if sort != "relevance" else "name"
+    if key == "mtime_desc":
+        kept.sort(key=lambda r: r["mtime"] or 0, reverse=True)
+    elif key == "mtime_asc":
+        kept.sort(key=lambda r: r["mtime"] or 0)
+    elif key == "size_desc":
+        kept.sort(key=lambda r: r["size"] or 0, reverse=True)
+    else:
+        kept.sort(key=lambda r: r["name"] or "")
+
+    page = kept[offset:offset + limit]
+    results = [{
+        "score": 1.0,
+        "path": fr["path"],
+        "name": fr["name"],
+        "file_type": fr["file_type"],
+        "location": "",
+        "cos_sim": 0.0,
+        "z": 0.0,
+        "coverage": 0.0,
+        "keyword_rank": None,
+        "snippet": "",
+        "mtime": fr["mtime"],
+        "strong": True,
+        "weak_fallback": False,
+        "fuzzy_match": False,
+        "nearby_frames": [],
+        "hits": [],
+        "confidence": "high",
+        "size": fr["size"] if "size" in fr.keys() else 0,
+        "sid": None,
+    } for fr in page]
+    return {"query": query, "ms": round((time.time() - t0) * 1000, 1),
+            "results": results, "facets": facets, "mode": "name"}
+
+
 def search_by_image(store, embedder, img, limit: int = 20, offset: int = 0,
                     file_type: str | None = None, dir_filter: str | None = None,
                     sort: str = "relevance", with_facets: bool = False,
@@ -494,7 +575,10 @@ def search_by_sid(store, embedder, sid: int, limit: int = 20, offset: int = 0,
 def _pool_search(store, qv, limit: int = 20, offset: int = 0,
                  file_type: str | None = None, dir_filter: str | None = None,
                  sort: str = "relevance", with_facets: bool = False,
-                 vis_only: bool = True):
+                 vis_only: bool = False,
+                 mtime_after: float | None = None, mtime_before: float | None = None,
+                 min_size: int | None = None, max_size: int | None = None):
+
     """向量查询的浏览型检索（以图搜图 / More like this 共用内核）。
 
     语义是"最相似的 N 个"（浏览型），不是"强匹配才算命中"（文字查询的
@@ -543,6 +627,14 @@ def _pool_search(store, qv, limit: int = 20, offset: int = 0,
         if file_type and fr["file_type"] != file_type:
             continue
         if dir_filter and dir_filter.lower() not in fr["path"].lower():
+            continue
+        if mtime_after is not None and (fr["mtime"] or 0) < mtime_after:
+            continue
+        if mtime_before is not None and (fr["mtime"] or 0) >= mtime_before:
+            continue
+        if min_size is not None and (fr["size"] or 0) < min_size:
+            continue
+        if max_size is not None and (fr["size"] or 0) > max_size:
             continue
         z_v, cos_v, sem_sid = best.get(fid, (0.0, 0.0, None))
         scored.append((max(z_v, 0.0), {"file_id": fid, "row": fr, "z": z_v,

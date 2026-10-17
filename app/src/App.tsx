@@ -4,6 +4,7 @@ import { RootManager } from "./components/RootManager";
 import { StatusBar } from "./components/StatusBar";
 import { VideoPreview } from "./components/VideoPreview";
 import { ImagePreview } from "./components/ImagePreview";
+import { FilePreview } from "./components/FilePreview";
 import { SettingsModal } from "./components/SettingsModal";
 import { ShortcutHelp } from "./components/ShortcutHelp";
 import { IconSearch, IconSettings, IconKeyboard } from "./icons";
@@ -17,6 +18,12 @@ export default function App() {
   const [imagePreview, setImagePreview] = useState<{
     path: string;
     siblings: ImageSibling[];
+  } | null>(null);
+  const [filePreview, setFilePreview] = useState<{
+    path: string;
+    file_type: string;
+    location?: string;
+    query?: string;
   } | null>(null);
 
   return (
@@ -47,6 +54,7 @@ export default function App() {
         <SearchPanel
           onPlayVideo={(path, location, hits) => setVideoPreview({ path, location, hits })}
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
+          onPreviewFile={(path, file_type, location, query) => setFilePreview({ path, file_type, location, query })}
           onShowHelp={() => setHelpOpen(true)}
         />
       </main>
@@ -75,6 +83,15 @@ export default function App() {
           siblings={imagePreview.siblings}
           onClose={() => setImagePreview(null)}
           onNavigate={(p) => setImagePreview(prev => prev ? { ...prev, path: p } : prev)}
+        />
+      )}
+      {filePreview && (
+        <FilePreview
+          path={filePreview.path}
+          file_type={filePreview.file_type}
+          location={filePreview.location}
+          query={filePreview.query}
+          onClose={() => setFilePreview(null)}
         />
       )}
     </div>

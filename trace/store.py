@@ -549,6 +549,16 @@ class Store:
             return [r["path"] for r in self.db.execute(
                 "SELECT path FROM files WHERE path LIKE ?", (root_prefix + "%",))]
 
+    def search_files_by_name(self, sub: str, limit: int = 2000) -> list[sqlite3.Row]:
+        """文件名子串搜索（name: 模式），大小写不敏感，转义 LIKE 通配符。"""
+        esc = sub.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        with self._lock:
+            return self.db.execute(
+                "SELECT file_id, path, name, file_type, mtime, size FROM files "
+                "WHERE lower(name) LIKE ? ESCAPE '\\' ORDER BY name LIMIT ?",
+                (f"%{esc.lower()}%", limit),
+            ).fetchall()
+
     def frame_locations(self, file_id: int) -> list[str]:
         """某视频文件的全部帧 location（视频附近帧条用）。"""
         with self._lock:

@@ -152,11 +152,17 @@ export const api = {
   },
   status: () => json<StatusResponse>("GET", "/api/status"),
   doctor: () => json<StatusResponse & { checks: { name: string; exists: boolean; size_mb: number; path: string }[] }>("GET", "/api/doctor"),
-  search: (query: string, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; threshold?: number; sort?: SortKey }) =>
+  search: (query: string, opts?: {
+    limit?: number; offset?: number; file_type?: string; dir?: string;
+    threshold?: number; sort?: SortKey;
+    mtime_after?: number; mtime_before?: number; min_size?: number; max_size?: number;
+  }) =>
     json<SearchResponse>("POST", "/api/search", {
       query, limit: opts?.limit ?? 10, offset: opts?.offset ?? 0,
       file_type: opts?.file_type, dir: opts?.dir, threshold: opts?.threshold,
       sort: opts?.sort ?? "relevance",
+      mtime_after: opts?.mtime_after, mtime_before: opts?.mtime_before,
+      min_size: opts?.min_size, max_size: opts?.max_size,
     }),
   /** 以图搜图：multipart 上传图片 → 视觉嵌入 → 相似切片检索；text 非空为图+文联合查询 */
   searchImage: async (file: File, opts?: { limit?: number; offset?: number; file_type?: string; dir?: string; sort?: SortKey; text?: string }) => {
@@ -201,4 +207,10 @@ export const api = {
     const qs = max_w > 0 ? `&max_w=${max_w}` : "";
     return `${_base}/api/raw?path=${encodeURIComponent(path)}${qs}`;
   },
+  /** 通用文件流 URL（音频/PDF 内嵌预览；FileResponse 支持 Range 拖动） */
+  fileSrc: (path: string) => `${_base}/api/file?path=${encodeURIComponent(path)}`,
+  /** 文本文件内容（编码已由后端探测，超 4MB 截断） */
+  textContent: (path: string) =>
+    json<{ text: string; encoding: string; truncated: boolean; size: number }>(
+      "GET", `/api/text?path=${encodeURIComponent(path)}`),
 };

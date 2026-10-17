@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from . import config
 from .embedder import Embedder
-from .search import search_with_timing
+from .search import name_search, search_with_timing
 from .store import Store
 from .tasks import IndexTaskManager
 
@@ -65,6 +65,10 @@ class SearchBody(BaseModel):
     dir: Optional[str] = None
     threshold: Optional[float] = None     # z-gate 门限（0=用默认 2.0）
     sort: str = "relevance"               # relevance/mtime_desc/mtime_asc/size_desc/name
+    mtime_after: Optional[float] = None   # 修改时间下限（epoch 秒）
+    mtime_before: Optional[float] = None  # 修改时间上限
+    min_size: Optional[int] = None        # 文件大小下限（字节）
+    max_size: Optional[int] = None        # 文件大小上限
 
 
 class SimilarBody(BaseModel):
@@ -175,14 +179,26 @@ def doctor() -> dict:
 @app.post("/api/search")
 def search(body: SearchBody) -> dict:
     s = _state()
+    q = body.query
+    # name: 前缀 → 纯文件名子串搜索（Everything 风格精确模式，不走向量）
+    if q.lower().startswith("name:"):
+        return name_search(s.store, q[5:].strip(), limit=body.limit,
+                           offset=max(0, body.offset), file_type=body.file_type,
+                           dir_filter=body.dir, sort=body.sort,
+                           mtime_after=body.mtime_after, mtime_before=body.mtime_before,
+                           min_size=body.min_size, max_size=body.max_size)
     embedder = s.get_embedder()
-    return search_with_timing(s.store, embedder, body.query,
+    return search_with_timing(s.store, embedder, q,
                               limit=body.limit,
                               offset=max(0, body.offset),
                               file_type=body.file_type,
                               dir_filter=body.dir,
                               z_gate=body.threshold,
                               sort=body.sort,
+                              mtime_after=body.mtime_after,
+                              mtime_before=body.mtime_before,
+                              min_size=body.min_size,
+                              max_size=body.max_size,
                               with_facets=True)
 
 
@@ -465,6 +481,51 @@ def raw_file(path: str, max_w: int = 0) -> "StreamingResponse":
         log.warning("raw_file decode failed for %s: %s; fallback to bytes", path, e)
         return Response(content=p.read_bytes(), media_type=mime,
                         headers={"Cache-Control": "public, max-age=600"})
+
+
+@app.get("/api/file")
+def file_stream(path: str) -> "FileResponse":
+    """通用文件流式输出（音频/PDF 内嵌预览用）。
+
+    FileResponse 自带 Range/206 支持——HTML5 <audio> 拖动进度条必需。
+    仅本地侧车 + WebView2 使用，路径可见性与 /api/raw 一致。
+    """
+    from fastapi.responses import FileResponse
+
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, f"file missing: {path}")
+    return FileResponse(p, filename=p.name, headers={
+        "Cache-Control": "no-store",
+        "Accept-Ranges": "bytes",
+    })
+
+
+_MAX_TEXT_BYTES = 4 * 1024 * 1024  # 4MB 文本上限，防超大日志拖垮 WebView
+
+
+@app.get("/api/text")
+def text_content(path: str) -> dict:
+    """文本文件内容（内嵌预览用）：编码探测 + 超限截断。"""
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, f"file missing: {path}")
+    raw = p.read_bytes()[:_MAX_TEXT_BYTES]
+    enc = "utf-8"
+    try:
+        text = raw.decode(enc)
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gb18030")  # Windows 中文环境最常见回退
+            enc = "gb18030"
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", errors="replace")
+    return {
+        "text": text,
+        "encoding": enc,
+        "truncated": p.stat().st_size > _MAX_TEXT_BYTES,
+        "size": p.stat().st_size,
+    }
 
 
 @app.get("/api/video/frame")

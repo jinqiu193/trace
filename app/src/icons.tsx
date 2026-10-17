@@ -113,6 +113,22 @@ export const IconFile = (p: IconProps) => (
   </S>
 );
 
+export const IconDocText = (p: IconProps) => (
+  <S {...p}>
+    <path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5Z" />
+    <path d="M13.5 3V8.5H19" />
+    <path d="M9 12h6M9 15.5h6M9 8.5h1.5" />
+  </S>
+);
+
+export const IconMusic = (p: IconProps) => (
+  <S {...p}>
+    <path d="M9 18V5l11-2v13" />
+    <circle cx="6.5" cy="18" r="2.5" />
+    <circle cx="17.5" cy="16" r="2.5" />
+  </S>
+);
+
 export const IconLayers = (p: IconProps) => (
   <S {...p}>
     <path d="m12 3 8.5 4.5L12 12 3.5 7.5Z" />
