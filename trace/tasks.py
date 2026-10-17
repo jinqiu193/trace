@@ -70,15 +70,27 @@ class IndexTaskManager:
     # ------------------------------------------------------------------ #
     def start_root(self, root: str, full: bool = False, by: str = "user") -> bool:
         """整目录索引（后台线程）。已在跑 → 拒绝（返回 False）。"""
-        return self._launch(kind="index_root", root=root, full=full, by=by, paths=None)
+        return self._launch(kind="index_root", root=root, full=full, by=by,
+                            paths=None, roots=None)
+
+    def start_roots(self, roots: list[str], full: bool = False,
+                    by: str = "user") -> bool:
+        """多个 root 顺序索引（重建全库用）。已在跑 → 拒绝。"""
+        roots = [r for r in roots if r]
+        if not roots:
+            return True
+        return self._launch(kind="index_roots", root=roots[0], full=full, by=by,
+                            paths=None, roots=roots)
 
     def start_paths(self, paths: list[str], root: str = "", by: str = "watcher") -> bool:
         """定向增量（watcher 变更路径）。"""
         if not paths:
             return True
-        return self._launch(kind="index_paths", root=root, full=False, by=by, paths=paths)
+        return self._launch(kind="index_paths", root=root, full=False, by=by,
+                            paths=paths, roots=None)
 
-    def _launch(self, kind: str, root: str, full: bool, by: str, paths) -> bool:
+    def _launch(self, kind: str, root: str, full: bool, by: str, paths,
+                roots) -> bool:
         # 用户显式任务可抢占 watcher 自动任务（自动同步随时可重来，用户操作优先）。
         # 抢占 = 置 cancel 后锁外等线程退出（_run 收尾要拿锁，锁内 join 会死锁）。
         if by == "user":
@@ -121,6 +133,23 @@ class IndexTaskManager:
                 if kind == "index_root":
                     result = indexer.index_root(root, full=full,
                                                 progress=_progress, cancel=cancel)
+                elif kind == "index_roots":
+                    result = {"roots": 0, "scanned": 0, "indexed": 0,
+                              "skipped": 0, "errors": 0, "cancelled": False}
+                    for r in (roots or []):
+                        if cancel is not None and cancel.is_set():
+                            result["cancelled"] = True
+                            break
+                        with self._lock:
+                            status_ref["root"] = r
+                        sub = indexer.index_root(r, full=full,
+                                                 progress=_progress, cancel=cancel)
+                        result["roots"] += 1
+                        for k in ("scanned", "indexed", "skipped", "errors"):
+                            result[k] += sub.get(k, 0)
+                        if sub.get("cancelled"):
+                            result["cancelled"] = True
+                            break
                 else:
                     result = indexer.index_paths(paths, progress=_progress, cancel=cancel)
                 result["seconds"] = round(time.time() - t0, 1)
@@ -128,7 +157,9 @@ class IndexTaskManager:
                     status_ref["result"] = result
                     status_ref["progress"] = result
                 log.info("后台索引完成 kind=%s root=%s by=%s：扫描 %d 索引 %d 跳过 %d 错误 %d 用时 %.1fs",
-                         kind, root or f"{len(paths)} paths", by,
+                         kind,
+                         f"{len(roots)} roots" if roots else (root or f"{len(paths or [])} paths"),
+                         by,
                          result.get("scanned", 0), result.get("indexed", 0),
                          result.get("skipped", 0), result.get("errors", 0),
                          result.get("seconds", 0.0))

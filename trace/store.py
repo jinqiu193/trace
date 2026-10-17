@@ -82,6 +82,20 @@ def _chunked(seq: list, size: int = config.FTS_IN_CHUNK):
         yield seq[i:i + size]
 
 
+def _root_prefix(root: str) -> str:
+    """root 目录的 LIKE 精确前缀（带尾分隔符）。
+
+    2026-10-17 修：此前 remove_root 用 "/" 拼接、paths_under 完全不拼分隔符，
+    导致 Windows 反斜杠路径（库内实际存储形式）漏匹配 / 误匹配（相邻目录）。
+    """
+    import os
+
+    r = str(root)
+    if r.endswith(("\\", "/")):
+        return r
+    return r + os.sep
+
+
 class Store:
     def __init__(self, db_path: Path | None = None, check_same_thread: bool | None = None):
         import sqlite_vec
@@ -91,7 +105,7 @@ class Store:
         # 线程模型：无论 check_same_thread 传什么，公共方法都在 RLock 内执行，
         # 由本类保证同一时刻只有一个线程碰连接（web 边车多线程场景）。
         self._lock = threading.RLock()
-        self._batch_depth = 0
+        self._batch_tls = threading.local()
         kwargs = {} if check_same_thread is None else {"check_same_thread": check_same_thread}
         self.db = sqlite3.connect(str(self.db_path), **kwargs)
         self.db.enable_load_extension(True)
@@ -134,7 +148,7 @@ class Store:
     # 事务：batch 模式下抑制中间 commit
     # ------------------------------------------------------------------ #
     def _commit(self) -> None:
-        if self._batch_depth == 0:
+        if getattr(self._batch_tls, "depth", 0) == 0:
             self.db.commit()
 
     @contextmanager
@@ -143,15 +157,17 @@ class Store:
 
         索引器每 BATCH_COMMIT_FILES 个文件包一层。中途崩溃丢一批（下次
         增量按 mtime 补回），换来数量级的写入吞吐。
+        depth 存线程局部：两个线程同时 batch 互不干扰，先退出者只提交
+        自己的写（否则会把另一线程写到一半的数据提前 commit）。
         """
         with self._lock:
-            self._batch_depth += 1
+            self._batch_tls.depth = getattr(self._batch_tls, "depth", 0) + 1
         try:
             yield
         finally:
             with self._lock:
-                self._batch_depth -= 1
-                if self._batch_depth == 0:
+                self._batch_tls.depth -= 1
+                if self._batch_tls.depth == 0:
                     self.db.commit()
 
     def _invalidate_cache(self) -> None:
@@ -218,16 +234,14 @@ class Store:
         p = str(Path(path).resolve())
         with self._lock:
             # 先删该 root 下的所有文件索引（files + slices + vec_index + fts）
-            # ——光删 roots 留尸会让 GUI 列表里没显示但搜索还能命中
-            prefix = p if p.endswith(("/", "\\")) else p + "/"
-            fids = [r["file_id"] for r in self.db.execute(
-                "SELECT file_id FROM files WHERE path LIKE ?", (prefix + "%",))]
-            if fids:
-                for chunk in _chunked(fids):
-                    marks = ",".join("?" * len(chunk))
-                    self.db.execute(f"DELETE FROM slices WHERE file_id IN ({marks})", chunk)
-                    self.db.execute(f"DELETE FROM files WHERE file_id IN ({marks})", chunk)
-                self._invalidate_cache()
+            # ——光删 roots 留尸会让 GUI 列表里没显示但搜索还能命中。
+            # 复用 delete_file：它同步清理 vec_index/slices_fts/slices/files；
+            # 此前此处手写 DELETE 遗漏 vec_index + slices_fts，且前缀用 "/"
+            # 导致 Windows 反斜杠路径一条都匹配不到（2026-10-17 修）。
+            paths = [r["path"] for r in self.db.execute(
+                "SELECT path FROM files WHERE path LIKE ?", (_root_prefix(p) + "%",))]
+            if paths:
+                self.delete_files(paths)
             cur = self.db.execute("DELETE FROM roots WHERE path=?", (p,))
             self._commit()
             return cur.rowcount > 0
@@ -245,7 +259,7 @@ class Store:
 
     def file_states(self, root_prefix: str) -> dict[str, tuple[int, float]]:
         """root 前缀下全部 {path: (size, mtime)}——watcher 增量比对用。"""
-        prefix = root_prefix if root_prefix.endswith(("\\", "/")) else root_prefix + "\\"
+        prefix = _root_prefix(root_prefix)
         out: dict[str, tuple[int, float]] = {}
         with self._lock:
             for r in self.db.execute(
@@ -547,7 +561,7 @@ class Store:
         """root 前缀下全部已索引路径——索引对账用（替代直接摸 store.db）。"""
         with self._lock:
             return [r["path"] for r in self.db.execute(
-                "SELECT path FROM files WHERE path LIKE ?", (root_prefix + "%",))]
+                "SELECT path FROM files WHERE path LIKE ?", (_root_prefix(root_prefix) + "%",))]
 
     def search_files_by_name(self, sub: str, limit: int = 2000) -> list[sqlite3.Row]:
         """文件名子串搜索（name: 模式），大小写不敏感，转义 LIKE 通配符。"""

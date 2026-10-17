@@ -83,9 +83,11 @@ class RootWatcher(threading.Thread):
                 continue
             if len(changed) > config.WATCH_RESCAN_THRESHOLD:
                 log.info("watcher：%d 个文件变更（%s），走整目录增量", len(changed), root)
-                self._tasks.start_root(root, full=False, by="watcher")
+                if not self._tasks.start_root(root, full=False, by="watcher"):
+                    log.info("watcher：%s 有任务在跑，本轮增量顺延", root)
             else:
                 log.info("watcher：%d 个文件变更（%s），定向增量：%s …",
                          len(changed), root, changed[0])
-                self._tasks.start_paths(changed, root=root, by="watcher")
+                if not self._tasks.start_paths(changed, root=root, by="watcher"):
+                    log.info("watcher：%s 有任务在跑，本轮增量顺延", root)
             return  # 一次只触发一个任务，其余下个周期处理

@@ -303,9 +303,11 @@ def index(body: IndexBody) -> dict:
     p = Path(body.path)
     if not p.is_dir():
         raise HTTPException(400, f"not a directory: {body.path}")
-    s.store.add_root(body.path)   # 立即登记（首索中断也保留范围，watcher 可续）
+    # 先起任务再登记：409（已有任务在跑）时不登记目录，避免"报错却已入库"。
+    # 首索中断仍保留范围（start 成功即已 add，watcher 可续）。
     if not s.tasks.start_root(body.path, full=body.full, by="user"):
         raise HTTPException(409, "an index task is already running")
+    s.store.add_root(body.path)
     return {"ok": True, "path": body.path, "task": s.tasks.brief()}
 
 
@@ -357,12 +359,11 @@ def reindex_all(full: bool = False) -> dict:
     roots = s.store.list_roots()
     if not roots:
         return {"results": []}
-    # 逐个排队跑：start_root 单任务模型，这里直接起第一个并告知总量。
+    # 所有 root 在一个后台任务里顺序跑完（cancel 可中断，进度按当前 root 展示）。
     # 默认增量（指纹跳过已索引文件，秒级）；full=True 才全量重嵌（慢，慎用）
-    started = s.tasks.start_root(roots[0], full=full, by="user")
-    if not started:
+    if not s.tasks.start_roots(roots, full=full, by="user"):
         raise HTTPException(409, "an index task is already running")
-    return {"ok": True, "queued": len(roots), "first": roots[0], "full": full,
+    return {"ok": True, "queued": len(roots), "roots": roots, "full": full,
             "task": s.tasks.brief()}
 
 

@@ -204,7 +204,7 @@ export const api = {
   indexStatus: () => json<IndexTaskStatus>("GET", "/api/index/status"),
   indexCancel: () => json<{ ok: boolean }>("POST", "/api/index/cancel", {}),
   reindexAll: (full = false) =>
-    json<{ ok: boolean; queued: number; first: string; full: boolean }>("POST", `/api/reindex?full=${full}`, {}),
+    json<{ ok: boolean; queued: number; roots: string[]; full: boolean }>("POST", `/api/reindex?full=${full}`, {}),
   roots: () => json<{ roots: string[] }>("GET", "/api/roots"),
   addRoot: (path: string) => json<{ ok: boolean; path: string }>("POST", "/api/roots", { path }),
   removeRoot: (path: string) => json<{ ok: boolean; path: string }>("DELETE", `/api/roots/${encodeURI(path)}`),
