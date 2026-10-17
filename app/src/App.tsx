@@ -56,6 +56,7 @@ export default function App() {
           onPreviewImage={(path, siblings) => setImagePreview({ path, siblings })}
           onPreviewFile={(path, file_type, location, query) => setFilePreview({ path, file_type, location, query })}
           onShowHelp={() => setHelpOpen(true)}
+          rootsTick={statusTick}
         />
       </main>
       <StatusBar tick={statusTick} />

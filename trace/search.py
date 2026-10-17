@@ -260,6 +260,7 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
             仅比对 2 个代表片段，跳过命中详情组装）。
         with_facets: True 时返回 (results, facets)——类型分布计数。
     """
+    z_gate_arg = z_gate                      # None=调用方未显式指定（用默认）
     z_gate = z_gate if z_gate is not None else Z_GATE
     qv = _cached_query_vector(embedder, query)
 
@@ -306,16 +307,17 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
     candidates = {fid for fid, (z, _c, _s) in best_sem.items() if z >= z_gate}
     candidates |= {fid for fid, cov in coverage.items() if cov >= 0.5}
     # 兜底：单模态 / 长视频场景下 z 全在 ±1，z-gate 永远卡掉所有结果
-    # 此时按 raw cosine 取 top-3，让用户至少能看到"语义最像"的视频帧
+    # 此时按 raw cosine 取 top-3，让用户至少能看到"语义最像"的视频帧。
+    # 仅默认门槛时兜底——调用方显式传 z_gate 表示"宁缺毋滥"，应如实返回空
     fallback = False
-    if not candidates and best_sem:
+    if not candidates and best_sem and z_gate_arg is None:
         fallback = True
         top = sorted(best_sem.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
         candidates = {fid for fid, _ in top}
 
     # P0：空候选集短路（原先生成 IN () 非法 SQL）
     if not candidates:
-        return []
+        return ([], {}) if with_facets else []
 
     file_rows = store.files_by_ids(candidates)
 

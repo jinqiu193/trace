@@ -1,6 +1,7 @@
 /* =====================================================================
-   Trace 设计系统 — Graphite & Mist
+   Trace 设计系统 — Graphite & Mist（暗色默认） / Mist Paper（浅色）
    石墨近黑基底 / 高对比文字 / 低饱和雾色 / 自然过渡
+   浅色主题通过 :root[data-theme="light"] 覆盖变量切换
    ===================================================================== */
 
 :root {
@@ -26,6 +27,32 @@
   --ease: cubic-bezier(0.33, 0.68, 0.24, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur: 0.18s;
+  /* 主题相关衍生变量（玻璃层/滚动条/品牌块/命中标记） */
+  --scroll: rgba(255, 255, 255, 0.1);
+  --scroll-hover: rgba(255, 255, 255, 0.18);
+  --sel: rgba(128, 141, 201, 0.38);
+  --glass-0: rgba(255, 255, 255, 0.025);
+  --glass-1: rgba(255, 255, 255, 0.06);
+  --glass-2: rgba(255, 255, 255, 0.1);
+  --glass-bd: rgba(255, 255, 255, 0.06);
+  --inset-hi: rgba(255, 255, 255, 0.03);
+  --checker: rgba(255, 255, 255, 0.02);
+  --menubar-bg: rgba(17, 19, 25, 0.85);
+  --title-a: #f0f2f7;
+  --title-b: #b7c1ee;
+  --brand-grad: linear-gradient(135deg, #6b78b8, #8d86c4);
+  --brand-shadow-sm: 0 0 12px rgba(107, 120, 184, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --brand-shadow-md: 0 0 32px rgba(107, 120, 184, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --brand-shadow-lg: 0 0 40px rgba(107, 120, 184, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --mark-bg: rgba(128, 141, 201, 0.28);
+  --mark-fg: #e6e0c8;
+  --sem-bg: rgba(178, 160, 216, 0.15);
+  --sem-fg: #c9bce6;
+  --kw-bg: rgba(163, 191, 142, 0.13);
+  --kw-fg: #c3d4b3;
+  --kw-bd: rgba(163, 191, 142, 0.35);
+  --hit-mark: #c96b7f;
+  --hit-mark-hi: #da93a5;
 }
 
 * { box-sizing: border-box; }
@@ -41,19 +68,19 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: rgba(128, 141, 201, 0.38); }
+::selection { background: var(--sel); }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--scroll);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--scroll-hover);
   background-clip: content-box;
   border: 2px solid transparent;
 }
@@ -72,8 +99,7 @@ select:focus-visible {
 
 /* 嵌入式输入（外层容器已有 :focus-within 样式）不吃全局 focus ring，
    避免外扩 shadow 压在相邻图标上造成视觉错位 */
-.search-box input:focus-visible,
-.dir-input:focus-visible {
+.search-box input:focus-visible {
   box-shadow: none;
 }
 
@@ -506,62 +532,30 @@ select:focus-visible {
   padding: 3px 10px;
   border-radius: 999px;
 }
-.toolbar-types { display: flex; gap: 3px; flex-wrap: wrap; }
-.type-btn {
+/* 类型下拉（色点 + 原生 select，复用 range-select 皮肤） */
+.type-select {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  background: transparent;
-  color: var(--fg-3);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 3px 7px;
-  font-size: 10px;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+  gap: 0;
+  position: relative;
 }
-.type-btn:hover { color: var(--fg); border-color: var(--border-2); }
-.type-btn.active {
-  background: var(--accent-soft);
-  color: var(--accent-2);
-  border-color: var(--accent);
+.type-select .type-dot {
+  position: absolute;
+  left: 8px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0.9;
+  z-index: 1;
 }
+.type-select .range-select { padding-left: 21px; }
 .type-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
   opacity: 0.9;
 }
-.type-count {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--fg-3);
-  border-radius: 999px;
-  padding: 0 5px;
-  font-size: 9px;
-  font-family: var(--mono);
-  line-height: 14px;
-}
-.type-btn.active .type-count {
-  background: rgba(11, 12, 16, 0.35);
-  color: var(--fg);
-}
-.dir-input {
-  width: 128px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--fg);
-  padding: 4px 8px;
-  font-size: 11px;
-  font-family: var(--mono);
-}
-.dir-input::placeholder { color: var(--fg-3); font-family: inherit; }
-.dir-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
+.dir-select { max-width: 150px; }
 .thr-wrap {
   display: inline-flex;
   align-items: center;

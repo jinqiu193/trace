@@ -63,7 +63,7 @@ class SearchBody(BaseModel):
     offset: int = 0                       # 分页偏移（2026-10-16）
     file_type: Optional[str] = None
     dir: Optional[str] = None
-    threshold: Optional[float] = None     # z-gate 门限（0=用默认 2.0）
+    threshold: Optional[float] = None     # z-gate 门限（None=默认 2.0；0=不过滤）
     sort: str = "relevance"               # relevance/mtime_desc/mtime_asc/size_desc/name
     mtime_after: Optional[float] = None   # 修改时间下限（epoch 秒）
     mtime_before: Optional[float] = None  # 修改时间上限

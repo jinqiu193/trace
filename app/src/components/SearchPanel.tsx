@@ -46,6 +46,9 @@ const SIZE_RANGES: { key: string; label: string }[] = [
 
 const MB = 1024 * 1024;
 
+/** 相似度门槛默认值，与后端 Z_GATE 一致 */
+const DEFAULT_Z_GATE = 2.0;
+
 function dateRangeToAfter(r: string): number | undefined {
   const now = Date.now() / 1000;
   if (r === "today") return now - 86400;
@@ -134,9 +137,18 @@ export interface SearchPanelProps {
   onPreviewImage?: (path: string, siblings: ImageSibling[]) => void;
   onPreviewFile?: (path: string, file_type: string, location?: string, query?: string) => void;
   onShowHelp?: () => void;
+  /** 索引根目录变更信号（设置里增删目录后 +1），用于刷新位置下拉 */
+  rootsTick?: number;
 }
 
-export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp }: SearchPanelProps = {}) {
+/** 路径显示短名：取最后一段（D:\photos → photos；D:\ → D:\） */
+function pathShortName(p: string): string {
+  const norm = p.replace(/[\\/]+$/, "");
+  const seg = norm.split(/[\\/]/).filter(Boolean);
+  return seg.length ? seg[seg.length - 1] : p;
+}
+
+export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp, rootsTick = 0 }: SearchPanelProps = {}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -157,7 +169,8 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // 筛选（工具栏内联，与排序同级）
   const [fileType, setFileType] = useState("");
   const [dir, setDir] = useState("");
-  const [threshold, setThreshold] = useState(0);
+  // 相似度门槛（z 分）：越大越严，只保留与查询越相似的结果；0 = 不过滤
+  const [threshold, setThreshold] = useState(DEFAULT_Z_GATE);
   const [dateRange, setDateRange] = useState("");    // "" / today / week / month / year
   const [sizeRange, setSizeRange] = useState("");    // "" / lt10 / 10-100 / 100-1024 / gt1024
   // 检索模式：详细（全切片+命中详情）/ 简单（视频每文件 2 代表片段，更快）
@@ -181,8 +194,17 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   const [view, setView] = useState<"list" | "grid">("list");
   const [facets, setFacets] = useState<Record<string, number>>({});
   const [dragOver, setDragOver] = useState(false);
+  // 索引根目录列表（位置下拉）
+  const [rootsList, setRootsList] = useState<string[]>([]);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+
+  // 拉取索引根目录（mount + 设置里增删后刷新）
+  useEffect(() => {
+    let alive = true;
+    api.roots().then(r => { if (alive && r.roots) setRootsList(r.roots); }).catch(() => {});
+    return () => { alive = false; };
+  }, [rootsTick]);
 
 
   // 键盘选中项滚动跟随（在视口边缘时平滑滚入）
@@ -374,7 +396,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           sort,
           file_type: fileType || undefined,
           dir: dir || undefined,
-          threshold: threshold && threshold > 0 ? threshold : undefined,
+          threshold,
           mtime_after: dateRangeToAfter(dateRange),
           min_size: sz.min,
           max_size: sz.max,
@@ -522,7 +544,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // name: 前缀 → 文件名精确搜索模式（Everything 风格）
   const isNameMode = !imgFile && !similarFrom
     && query.trim().toLowerCase().startsWith("name:") && query.trim().length > 5;
-  const hasFilters = fileType !== "" || dir !== "" || threshold > 0
+  const hasFilters = fileType !== "" || dir !== "" || threshold !== DEFAULT_Z_GATE
     || dateRange !== "" || sizeRange !== "";
 
   const renderThumb = (r: SearchResult, maxW: number) => {
@@ -687,30 +709,32 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
               </button>
             </span>
           )}
-          <div className="toolbar-types">
-            {FILTER_TYPES.map(t => (
-              <button
-                key={t}
-                className={"type-btn" + (fileType === t ? " active" : "")}
-                onClick={() => setFileType(fileType === t ? "" : t)}
-                title={facets && facets[t] > 0 ? `候选池中有 ${facets[t]} 个` : "候选池为空"}
-              >
-                <span className="type-dot" style={{ background: FILE_TYPE_COLORS[t] }} />
-                {TYPE_LABELS[t]}
-                {facets && facets[t] > 0 && (
-                  <span className="type-count">{facets[t]}</span>
-                )}
-              </button>
-            ))}
+          <div className="type-select" title="按文件类型过滤">
+            <span className="type-dot" style={{ background: fileType ? FILE_TYPE_COLORS[fileType] : "var(--fg-3)" }} />
+            <select
+              className={"range-select" + (fileType ? " active" : "")}
+              value={fileType}
+              onChange={(e) => setFileType(e.target.value)}
+            >
+              <option value="">全部类型</option>
+              {FILTER_TYPES.map(t => (
+                <option key={t} value={t}>
+                  {TYPE_LABELS[t]}{facets && facets[t] > 0 ? ` · ${facets[t]}` : ""}
+                </option>
+              ))}
+            </select>
           </div>
-          <input
-            className="dir-input"
+          <select
+            className={"range-select dir-select" + (dir ? " active" : "")}
             value={dir}
             onChange={(e) => setDir(e.target.value)}
-            placeholder="目录包含…"
-            spellCheck={false}
-            title="按路径子串过滤结果"
-          />
+            title={dir || "按索引位置过滤（在设置中可添加更多文件夹）"}
+          >
+            <option value="">全部位置</option>
+            {rootsList.map(r => (
+              <option key={r} value={r} title={r}>{pathShortName(r)}</option>
+            ))}
+          </select>
           <select
             className={"range-select" + (dateRange ? " active" : "")}
             value={dateRange}
@@ -728,8 +752,11 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             {SIZE_RANGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
           </select>
           {!(imgFile || similarFrom || isNameMode) && (
-            <div className="thr-wrap" title="相似度阈值（z 分），过滤弱匹配">
-              <span className="thr-label">相似度</span>
+            <div
+              className="thr-wrap"
+              title="相似度门槛（z 分）：值越大越严格，只保留与查询越相似的结果；拉到 0 显示全部候选"
+            >
+              <span className="thr-label">相似 ≥</span>
               <input
                 type="range"
                 min={0}
@@ -738,13 +765,13 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
                 value={threshold}
                 onChange={(e) => setThreshold(parseFloat(e.target.value))}
               />
-              <span className="threshold-val">{threshold.toFixed(1)}</span>
+              <span className="threshold-val">{threshold === 0 ? "全部" : threshold.toFixed(1)}</span>
             </div>
           )}
           {hasFilters && (
             <button
               className="filters-reset"
-              onClick={() => { setFileType(""); setDir(""); setThreshold(0); setDateRange(""); setSizeRange(""); }}
+              onClick={() => { setFileType(""); setDir(""); setThreshold(DEFAULT_Z_GATE); setDateRange(""); setSizeRange(""); }}
               title="清除全部筛选条件"
             >✕ 重置</button>
           )}
@@ -792,7 +819,9 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
               ? "没有找到相似内容。试试换一张图，或清除类型/目录过滤。"
               : similarFrom
                 ? "没有找到相似内容。"
-                : "没有命中。试试换个说法，或在右上角「设置」里添加更多文件夹。"}
+                : threshold > 0
+                  ? "没有足够相似的结果。试试调低「相似 ≥」门槛，或换个说法。"
+                  : "没有命中。试试换个说法，或在右上角「设置」里添加更多文件夹。"}
           </div>
         )}
 
