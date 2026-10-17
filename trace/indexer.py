@@ -412,7 +412,11 @@ class Indexer:
                         stats["removed"] += 1
 
         stats["seconds"] = round(time.time() - t0, 1)
-        self.store.set_meta("fingerprint", config.FINGERPRINT)
+        # 仅在完整跑完时落指纹：中途取消的库是"部分新向量 + 部分旧向量"，
+        # 若写入新指纹会让下次增量误以为已同步 → 新旧向量混用且无提示
+        # （2026-10-17 修）。取消时不写，下次增量会因指纹不符要求全量重建。
+        if not stats["cancelled"]:
+            self.store.set_meta("fingerprint", config.FINGERPRINT)
         if progress:
             progress(dict(stats))
         return stats

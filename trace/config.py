@@ -81,13 +81,21 @@ CHUNK_MAX_TOKENS = 480     # 文本块目标上限（留足前缀余量）
 CHUNK_OVERLAP_TOKENS = 64  # 相邻块重叠，防语义断裂
 AUDIO_WINDOW_SEC = 30      # 音频 30 秒窗口（EmbeddingGemma 2 audio 最多 30s）
 AUDIO_STRIDE_SEC = 25      # 步长 25 秒 → 5 秒重叠（DigUp：避免边缘词漏掉）
+AUDIO_MAX_WINDOWS = int(os.environ.get("TRACE_AUDIO_MAX_WINDOWS", "5"))
+    # 单视频/音频最多保留多少音窗（用户口径 2026-10-17：与视频 5 帧同量级）。
+    # 有总时长时等距抽 max_windows 个覆盖全程；否则顺序取前 max_windows 个
 VIDEO_FRAME_INTERVAL_SEC = 10  # tick 模式：每 10 秒抽一帧（scene 模式关闭时的回退口径）
+VIDEO_SEEK_MODE = os.environ.get("TRACE_VIDEO_SEEK", "1") != "0"
+    # 等距 seek 抽帧（2026-10-17 默认启用）：只 seek 到 N 个等分时间点各取一帧，
+    # 不解全片。此前"场景检测"要扫全片关键帧、"等距抽样"要全解码音频，帧数再少
+    # 也慢（2h 视频实测 93.8s）；seek 后 ~8s。TRACE_VIDEO_SEEK=0 回退下方模式。
 VIDEO_SCENE_MODE = os.environ.get("TRACE_VIDEO_SCENE", "1") != "0"
-    # 场景模式（2026-10-17 默认启用）：skip_frame=NONKEY 只解码关键帧
+    # 场景模式（seek 关闭时的回退）：skip_frame=NONKEY 只解码关键帧
     # + aHash 场景检测 + 超上限等距抽稀。几小时视频抽 N 个代表镜头，
-    # 静止/缓变画面零嵌入成本。TRACE_VIDEO_SCENE=0 回退 tick 均匀采样。
-VIDEO_SCENE_MAX_SLICES = int(os.environ.get("TRACE_VIDEO_SCENE_MAX", "48"))
-    # 场景模式产出帧数上限（含首尾帧等距抽稀）；用户口径：覆盖场景即可，不求帧全
+    # 静止/缓变画面零嵌入成本。TRACE_VIDEO_SCENE=0 再回退 tick 均匀采样。
+VIDEO_SCENE_MAX_SLICES = int(os.environ.get("TRACE_VIDEO_SCENE_MAX", "5"))
+    # 场景模式产出帧数上限（含首尾帧等距抽稀）；用户口径（2026-10-17）：
+    # 任意视频只留 5 帧代表镜头，覆盖场景即可，不求帧全
 VIDEO_FRAME_MAX_PIXEL = 512    # 抽帧前长边缩到 512（CPU 跑 512 比 1024 快 ~4×，召回损失小）
 VIDEO_AHASH_SIDE = 8          # aHash 边长（DigUp：8×8 = 64 bit）
 VIDEO_AHASH_TOLERANCE = 4     # XOR 后 ≤4 bit 差异视为重复帧（DigUp 口径）
@@ -102,17 +110,19 @@ WATCH_RESCAN_THRESHOLD = 50   # 变更数超过此值改走整目录增量（比
 
 # ---- 索引指纹（DigUp fingerprint：模型/参数变化 → 索引不可混用，须重建）----
 _FP_IMG_PREFIX = f"img-pref={IMAGE_INDEX_PREFIX or 'none'}"
-_FP_FRAME = (
-    f"scene{VIDEO_SCENE_MAX_SLICES}" if VIDEO_SCENE_MODE
-    else f"tick{VIDEO_FRAME_INTERVAL_SEC}"
-) + f"/ahash{VIDEO_AHASH_SIDE}/{VIDEO_AHASH_TOLERANCE}/maxpx{VIDEO_FRAME_MAX_PIXEL}"
+_FP_MODE = (
+    f"seek{VIDEO_SCENE_MAX_SLICES}" if VIDEO_SEEK_MODE
+    else (f"scene{VIDEO_SCENE_MAX_SLICES}" if VIDEO_SCENE_MODE
+          else f"tick{VIDEO_FRAME_INTERVAL_SEC}")
+)
+_FP_FRAME = _FP_MODE + f"/ahash{VIDEO_AHASH_SIDE}/{VIDEO_AHASH_TOLERANCE}/maxpx{VIDEO_FRAME_MAX_PIXEL}"
 FINGERPRINT = (
     "embeddinggemma-2-onnx-int8"
     "| prompt-title-v1"          # 文档向量带文件名标题
     "| haswords-v1"              # 纯数字文本只进关键词
     f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
     f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}"
-    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip"
+    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip/max{AUDIO_MAX_WINDOWS}"
     f"| {_FP_IMG_PREFIX}"
 )
 FINGERPRINT_WEMM = (
@@ -120,7 +130,7 @@ FINGERPRINT_WEMM = (
     "| prompt-instruct-v1"
     f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
     f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}"
-    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip"
+    f"| audio{AUDIO_WINDOW_SEC}/{AUDIO_STRIDE_SEC}/rms-skip/max{AUDIO_MAX_WINDOWS}"
 )
 
 # ---- 索引排除规则（PRD 4.1 隐私硬排除）----

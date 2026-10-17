@@ -234,6 +234,65 @@ def _open_video_threaded(path):
     return container, v_stream
 
 
+def _iter_video_seek_slices(path: Path, embedder, *, max_pixel: int,
+                            max_frames: int, cancel=None) -> Iterator[dict]:
+    """等距 seek 抽帧（最快；2026-10-17 用户口径：任意视频只留 N 帧）。
+
+    只 seek 到 N 个等分时间点各取一帧，不解全片——静止/缓变靠等距覆盖即可。
+    实测 2h 视频：seek 抽 5 帧 ~1-2s（vs 场景检测扫全片 32s）。
+    cancel: threading.Event；置位后在每个目标点边界立即返回。
+    """
+    import av
+    n = max(1, min(max_frames, config.VIDEO_SCENE_MAX_SLICES))
+    container, v_stream = _open_video_threaded(path)
+    if v_stream is None:
+        return
+    try:
+        duration_s = None
+        if container.duration:
+            duration_s = float(container.duration) / av.time_base
+        elif v_stream.duration is not None and v_stream.time_base:
+            duration_s = float(v_stream.duration * v_stream.time_base)
+        if not duration_s or duration_s <= 0:
+            return
+        # N 个等分点（居中分布，避开片头/片尾黑场）
+        targets = [duration_s * (i + 0.5) / n for i in range(n)]
+        for t in targets:
+            if cancel is not None and cancel.is_set():
+                return
+            try:
+                container.seek(int(t * av.time_base))  # 容器级 seek（微秒）
+            except Exception:
+                continue
+            hit = None
+            for f in container.decode(v_stream):
+                ft = f.time if f.time is not None else 0.0
+                if ft >= t - 1e-3:
+                    hit = (f, ft)
+                    break
+            if hit is None:
+                continue
+            f, ft = hit
+            img = _video_pil(f.to_ndarray(format="bgr24"), max_pixel)
+            slice_dict = {
+                "modality": "video_frame",
+                "location": _format_ts(ft),
+                "text": "",
+                "keywords": f"{path.stem} t={_format_ts(ft)}",
+                "_pil": img,
+                "_ts": ft,
+                "_reason": "seek",
+            }
+            if embedder is not None:
+                try:
+                    slice_dict["vector"] = embedder.embed_image_pil(img)
+                except Exception:
+                    pass
+            yield slice_dict
+    finally:
+        container.close()
+
+
 def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
                              ahash_tolerance: int, max_frames: int,
                              cancel=None) -> Iterator[dict]:
@@ -279,10 +338,13 @@ def _iter_video_scene_slices(path: Path, embedder, *, max_pixel: int,
     # 场景帧数超上限 → 等距抽稀（保首尾）
     if len(scene_idx) > limit:
         n = len(scene_idx)
-        picked = sorted({int(round(k * (n - 1) / (limit - 1))) for k in range(limit)})
-        picked[0] = 0
-        picked[-1] = n - 1
-        scene_idx = [scene_idx[k] for k in picked]
+        if limit <= 1:
+            scene_idx = scene_idx[:1]
+        else:
+            picked = sorted({int(round(k * (n - 1) / (limit - 1))) for k in range(limit)})
+            picked[0] = 0
+            picked[-1] = n - 1
+            scene_idx = [scene_idx[k] for k in picked]
     keep = set(scene_idx)
 
     # ---- 第二遍：同参数再解一遍，命中帧产出 ----
@@ -371,7 +433,17 @@ def iter_video_slices(path: Path, embedder=None, *,
     if not duration_s or duration_s <= 0:
         return
 
-    # ---- 1.5 场景模式（默认）：关键帧-only 解码 + aHash 场景检测 + 上限抽稀 ----
+    # ---- 1.5 等距 seek（默认，最快）：只 seek N 个等分点取帧，不解全片 ----
+    if config.VIDEO_SEEK_MODE:
+        try:
+            yield from _iter_video_seek_slices(
+                path, embedder, max_pixel=max_pixel,
+                max_frames=max_frames, cancel=cancel)
+            return
+        except Exception:
+            pass  # seek 失败 → 回退下方场景/tick
+
+    # ---- 1.6 场景模式（seek 关闭时的回退）：关键帧-only 解码 + aHash 场景检测 + 上限抽稀 ----
     if config.VIDEO_SCENE_MODE:
         try:
             yield from _iter_video_scene_slices(
@@ -528,6 +600,7 @@ def iter_audio_windows(path: Path, *,
                       min_sec: float = 2.0,
                       silence_rms: float = 0.003,
                       sr: int = 16000,
+                      max_windows: int | None = None,
                       cancel=None) -> Iterator[tuple[np.ndarray, float, float]]:
     """音频文件（或视频音轨）→ (int16 PCM, start_s, end_s) 流。
 
@@ -566,13 +639,61 @@ def iter_audio_windows(path: Path, *,
         except Exception:
             pass
 
-        resampler = av.AudioResampler(
-            format="s16", layout="mono", rate=sr,
-        )
+        # 音频窗上限（用户口径 2026-10-17：与视频 5 帧同量级）。
+        max_windows = max_windows if max_windows is not None else config.AUDIO_MAX_WINDOWS
+        duration_s = None
+        try:
+            if container.duration:
+                duration_s = float(container.duration) / av.time_base
+            elif audio_stream.duration is not None and audio_stream.time_base:
+                duration_s = float(audio_stream.duration * audio_stream.time_base)
+        except Exception:
+            duration_s = None
+        if duration_s is not None and duration_s <= 0:
+            duration_s = None
 
+        # ---- seek 等距模式（有总时长）：逐目标点 seek 取一个窗，不解全片 ----
+        # 实测 2h 音轨：seek 取 5 窗 ~3-5s（vs 全片顺序解码 40s）。
+        if duration_s and max_windows and max_windows > 0:
+            n = max(1, max_windows)
+            targets = [duration_s * (i + 0.5) / n for i in range(n)]
+            for t in targets:
+                if cancel is not None and cancel.is_set():
+                    return
+                try:
+                    container.seek(int(t * av.time_base))  # 容器级 seek（微秒）
+                except Exception:
+                    continue
+                resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
+                buf = np.empty(0, dtype=np.int16)
+                for frame in container.decode(audio_stream):
+                    if cancel is not None and cancel.is_set():
+                        return
+                    rs = resampler.resample(frame)
+                    if isinstance(rs, list):
+                        rs = rs[0] if rs else None
+                    if rs is None:
+                        continue
+                    pcm = rs.to_ndarray()
+                    if pcm.ndim == 2:
+                        # mono 时只有 1 通道 → 取全部 samples（[0, :]）
+                        pcm = pcm[0, :]
+                    pcm = pcm.astype(np.int16, copy=False)
+                    buf = np.concatenate([buf, pcm]) if buf.size else pcm
+                    if buf.size >= window_samples:
+                        break
+                if buf.size >= min_samples:
+                    seg = buf[:window_samples]
+                    if _rms_int16(seg) > silence_rms:
+                        yield seg, t, t + window_sec
+            return
+
+        # ---- 顺序回退（无总时长）：取前 max_windows 个非静音窗 ----
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
         buffer = np.empty(0, dtype=np.int16)
         offset = 0   # sample 索引（buffer[0] 在文件中的位置）
         tail_emitted = False
+        kept = 0     # 已产出窗口数
 
         def _emit(count: int, start_sample: int) -> np.ndarray:
             return buffer[:count].copy()
@@ -596,8 +717,10 @@ def iter_audio_windows(path: Path, *,
 
             while buffer.size >= window_samples:
                 if _rms_int16(buffer[:window_samples]) > silence_rms:
-                    arr = _emit(window_samples, offset)
-                    yield arr, offset / sr, (offset + window_samples) / sr
+                    yield _emit(window_samples, offset), offset / sr, (offset + window_samples) / sr
+                    kept += 1
+                    if max_windows and kept >= max_windows:
+                        return  # 取满上限即停
                 buffer = buffer[hop_samples:]
                 offset += hop_samples
 
