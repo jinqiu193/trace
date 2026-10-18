@@ -1,6 +1,6 @@
 [project]
 name = "trace"
-version = "0.1.0"
+version = "0.2.0"
 description = "本地文件夹多模态语义检索：EmbeddingGemma 2 (ONNX) + SQLite (FTS5 + sqlite-vec)"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,6 +1,6 @@
 [package]
 name = "trace-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Trace — 本地文件夹语义检索 (P1 桌面端)"
 authors = ["Trace"]
 edition = "2021"
