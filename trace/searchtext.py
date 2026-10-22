@@ -88,12 +88,15 @@ KIND_WORDS = {
     "video": "video", "videos": "video", "clip": "video", "movie": "video",
     "audio": "audio", "song": "audio", "podcast": "audio", "voice": "audio",
     "sound": "audio",
+    "code": "code", "codes": "code", "script": "code", "scripts": "code",
+    "source": "code",
     # 中文类型词（搜"…的截图"也应给出类型提示）
     "截图": "screenshot", "屏幕": "screenshot", "屏摄": "screenshot",
     "图片": "image", "照片": "image", "相片": "image",
     "视频": "video", "影片": "video", "短片": "video", "录像": "video",
     "音频": "audio", "录音": "audio", "音乐": "audio", "声音": "audio",
     "文档": "doc", "笔记": "doc", "文章": "doc",
+    "代码": "code", "脚本": "code", "源码": "code", "源代码": "code",
 }
 
 

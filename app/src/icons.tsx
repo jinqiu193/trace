@@ -38,6 +38,10 @@ export const IconClose = (p: IconProps) => (
   <S {...p}><path d="M6 6l12 12M18 6L6 18" /></S>
 );
 
+export const IconCode = (p: IconProps) => (
+  <S {...p}><path d="m8 7-5 5 5 5M16 7l5 5-5 5" /></S>
+);
+
 export const IconSettings = (p: IconProps) => (
   <S {...p}>
     <path d="M3 5h7M16 5h5M3 12h3M12 12h9M3 19h11M20 19h1" />

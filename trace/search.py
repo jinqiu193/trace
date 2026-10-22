@@ -205,15 +205,19 @@ _QUERY_VEC_CACHE: dict[str, np.ndarray] = {}
 _QUERY_VEC_CACHE_MAX = 32
 
 
-def _cached_query_vector(embedder, query: str) -> np.ndarray:
-    qv = _QUERY_VEC_CACHE.get(query)
+def _cached_query_vector(embedder, query: str, code: bool = False) -> np.ndarray:
+    # code 查询走 embed_query_code（code retrieval 任务前缀），与文本查询
+    # 向量不同源——缓存 key 加通道前缀防串扰。
+    key = ("code\x00" if code else "text\x00") + query
+    qv = _QUERY_VEC_CACHE.get(key)
     if qv is not None:
         return qv
-    qv = np.asarray(embedder.embed_query(query), dtype=np.float32)
+    qv = np.asarray(embedder.embed_query_code(query) if code
+                    else embedder.embed_query(query), dtype=np.float32)
     qv /= max(np.linalg.norm(qv), 1e-9)
     if len(_QUERY_VEC_CACHE) >= _QUERY_VEC_CACHE_MAX:
         _QUERY_VEC_CACHE.pop(next(iter(_QUERY_VEC_CACHE)))  # FIFO 淘汰
-    _QUERY_VEC_CACHE[query] = qv
+    _QUERY_VEC_CACHE[key] = qv
     return qv
 
 
@@ -248,7 +252,8 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
            mtime_after: float | None = None, mtime_before: float | None = None,
            min_size: int | None = None, max_size: int | None = None,
            mode: str = "detailed",
-           with_facets: bool = False) -> list[dict] | tuple[list[dict], dict]:
+           with_facets: bool = False,
+           code: bool = False) -> list[dict] | tuple[list[dict], dict]:
     """混合语义+关键词检索，返回按融合分排序的文件级结果。
 
     Args:
@@ -260,10 +265,12 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         mode: "detailed"（默认，全切片 + 命中详情）/ "fast"（视频每文件
             仅比对 2 个代表片段，跳过命中详情组装）。
         with_facets: True 时返回 (results, facets)——类型分布计数。
+        code: True 时查询向量走 code retrieval 任务前缀（embed_query_code），
+            配 file_type="code" 即 `code:` 代码专搜。
     """
     z_gate_arg = z_gate                      # None=调用方未显式指定（用默认）
     z_gate = z_gate if z_gate is not None else Z_GATE
-    qv = _cached_query_vector(embedder, query)
+    qv = _cached_query_vector(embedder, query, code=code)
 
     # ---- 1. 语义通道：全量 cosine + z-score（矩阵缓存）----
     sids, fids, mods, matrix = store.all_vectors_matrix()

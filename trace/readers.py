@@ -964,6 +964,8 @@ def classify(path: Path) -> str:
         return "audio"
     if ext in config.VIDEO_EXTS:
         return "video"
+    if ext in config.CODE_EXTS:
+        return "code"
     if ext in config.TEXT_EXTS or ext in config.DOC_EXTS:
         return "text"
     return "other"
@@ -975,10 +977,10 @@ def iter_slices(path: Path, token_counter=None) -> Iterator[dict]:
     text 进 FTS5 + 语义向量；keywords 预留给 OCR/标识符（PRD FR-4）。
     """
     kind = classify(path)
-    if kind == "text":
+    if kind in ("text", "code"):
         text = read_text(path)
         if text.strip():
-            yield {"modality": "text", "location": "none", "text": text, "keywords": path.name}
+            yield {"modality": kind, "location": "none", "text": text, "keywords": path.name}
     elif kind == "pdf":
         first = True
         for page_no, page_text in read_pdf_pages(path, max_pages_first=30 if first else None):

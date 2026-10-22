@@ -18,6 +18,13 @@ const SECTIONS: { title: string; rows: [React.ReactNode, string][] }[] = [
     ],
   },
   {
+    title: "搜索语法",
+    rows: [
+      [<K>name:关键词</K>, "按文件名精确搜索（Everything 风格，不走向量）"],
+      [<K>code:函数或类名</K>, "代码专搜：只在代码文件中做语义 + 关键词检索"],
+    ],
+  },
+  {
     title: "视图",
     rows: [
       [<><K>Ctrl</K> <K>G</K></>, "切换 列表 / 网格 视图"],

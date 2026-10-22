@@ -204,6 +204,24 @@ def search(body: SearchBody) -> dict:
                            dir_filter=body.dir, sort=body.sort,
                            mtime_after=body.mtime_after, mtime_before=body.mtime_before,
                            min_size=body.min_size, max_size=body.max_size)
+    # code: 前缀 → 代码专搜：code retrieval 任务前缀向量 + 限定代码类型
+    # （用户显式选了类型过滤时尊重用户选择）
+    if q.lower().startswith("code:"):
+        embedder = s.get_embedder()
+        return search_with_timing(s.store, embedder, q[5:].strip(),
+                                  limit=body.limit,
+                                  offset=max(0, body.offset),
+                                  file_type=body.file_type or "code",
+                                  dir_filter=body.dir,
+                                  z_gate=body.threshold,
+                                  sort=body.sort,
+                                  mtime_after=body.mtime_after,
+                                  mtime_before=body.mtime_before,
+                                  min_size=body.min_size,
+                                  max_size=body.max_size,
+                                  mode=body.mode,
+                                  with_facets=True,
+                                  code=True)
     embedder = s.get_embedder()
     return search_with_timing(s.store, embedder, q,
                               limit=body.limit,

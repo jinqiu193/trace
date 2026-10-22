@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { api, SearchResult, SortKey, SearchMode, VideoHit } from "../api";
 import {
-  IconSearch, IconImage, IconClose, IconSimilar,
+  IconSearch, IconImage, IconClose, IconSimilar, IconCode,
   IconClock, IconCopy, IconDownload, IconSparkle, IconUpload, IconKeyboard, IconCheck,
 } from "../icons";
 
@@ -200,9 +200,11 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
     }
     if ((r.file_type === "audio" || r.file_type === "pdf"
       || r.file_type === "text" || r.file_type === "code") && onPreviewFile) {
-      const q = query.trim().toLowerCase().startsWith("name:")
-        ? query.trim().slice(5).trim()      // name: 模式高亮文件名词
-        : query.trim();
+      const qt = query.trim();
+      const ql = qt.toLowerCase();
+      const q = ql.startsWith("name:") || ql.startsWith("code:")
+        ? qt.slice(5).trim()      // name:/code: 模式高亮剥离前缀后的实词
+        : qt;
       onPreviewFile(r.path, r.file_type, r.location || undefined, q || undefined);
       return;
     }
@@ -507,6 +509,9 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // name: 前缀 → 文件名精确搜索模式（Everything 风格）
   const isNameMode = !imgFile && !similarFrom
     && query.trim().toLowerCase().startsWith("name:") && query.trim().length > 5;
+  // code: 前缀 → 代码专搜模式（code retrieval 向量 + 限定代码类型）
+  const isCodeMode = !imgFile && !similarFrom
+    && query.trim().toLowerCase().startsWith("code:") && query.trim().length > 5;
   const hasFilters = fileType !== "" || dir !== "" || threshold > 0 || dateRange !== "";
 
   const renderThumb = (r: SearchResult, maxW: number) => {
@@ -626,7 +631,7 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           <div className="welcome-title">语义搜索本地文件</div>
           <div className="welcome-sub">
             文字描述、示例图片、甚至视频里的某句话——都能找到<br />
-            中英文混合、拼写偏差也没关系 · 输入 <kbd className="kbd">name:关键词</kbd> 可直接按文件名精确搜索
+            中英文混合、拼写偏差也没关系 · 输入 <kbd className="kbd">name:关键词</kbd> 按文件名精确搜索、<kbd className="kbd">code:函数名</kbd> 专搜代码
           </div>
           <div className="welcome-cards">
             <div className="welcome-card">
@@ -654,6 +659,12 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             <span className="img-mode-tag name-mode-tag" title="文件名子串精确匹配，不走向量">
               <IconSearch size={12} />
               文件名搜索
+            </span>
+          )}
+          {isCodeMode && (
+            <span className="img-mode-tag name-mode-tag" title="代码专搜：语义向量 + 关键词，只在代码文件中找">
+              <IconCode size={12} />
+              代码搜索
             </span>
           )}
           {imgFile && (

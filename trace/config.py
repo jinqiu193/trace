@@ -161,6 +161,10 @@ def extraction_fingerprint(kind: str) -> str:
         return core + f"| {_FP_AUDIO}"
     if kind == "image":
         return core + "| ocr-v1"
+    if kind == "code":
+        # code 与 text 切片算法一致，但 modality/file_type 不同——独立指纹
+        # 让旧库中按 text 索引的代码文件在增量任务里自动重索为 code。
+        return core + "| code-v1"
     return core
 
 # ---- 索引排除规则（PRD 4.1 隐私硬排除）----
@@ -180,8 +184,21 @@ EXCLUDE_FILE_NAMES = {"credentials", "passwords", "secrets", ".env", "id_rsa", "
 # ---- 文本类可索引扩展名（其余类型走对应 reader）----
 TEXT_EXTS = {
     ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv", ".json", ".jsonl",
-    ".py", ".js", ".ts", ".tsx", ".java", ".c", ".cpp", ".h", ".go", ".rs",
     ".html", ".htm", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+}
+# 源代码文件：独立 file_type="code"，查询侧用 code retrieval 任务前缀
+# （embed_query_code）。数据/配置格式（json/yaml/html 等）仍归 text。
+CODE_EXTS = {
+    ".py", ".pyw", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".java", ".kt", ".kts", ".scala", ".groovy",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",
+    ".cs", ".go", ".rs", ".swift", ".m", ".mm",
+    ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".dart",
+    ".ex", ".exs", ".erl", ".hrl", ".hs", ".ml", ".fs", ".clj", ".lisp",
+    ".vue", ".svelte",
+    ".sql", ".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd",
+    ".css", ".scss", ".less", ".sass",
+    ".asm", ".s", ".vb", ".pas", ".f", ".f90", ".cmake", ".gradle",
 }
 DOC_EXTS = {".docx", ".odt", ".rtf"}
 PDF_EXTS = {".pdf"}

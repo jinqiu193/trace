@@ -78,8 +78,16 @@ def cmd_index(store, embedder, args) -> int:
 
 
 def cmd_search(store, embedder, args) -> int:
-    res = search_with_timing(store, embedder, args.query, limit=args.limit,
-                             file_type=args.type, dir_filter=args.dir)
+    q = args.query
+    code = False
+    ftype = args.type
+    # code: 前缀 → 代码专搜（code retrieval 任务前缀 + 限定代码类型）
+    if q.lower().startswith("code:"):
+        q = q[5:].strip()
+        code = True
+        ftype = ftype or "code"
+    res = search_with_timing(store, embedder, q, limit=args.limit,
+                             file_type=ftype, dir_filter=args.dir, code=code)
     if not res["results"]:
         print(f"没有命中（{res['ms']}ms）。可先 python run.py index <目录>，或 python run.py status 查看索引量。")
         return 0

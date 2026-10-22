@@ -241,7 +241,7 @@ class Indexer:
         elif kind in ("image", "audio", "video"):
             pass  # 编码器未就绪，仅登记元数据
         else:
-            # 文本/PDF/docx：解析 + 切片（P0：纳入 try，独占/损坏文件不再炸整轮）
+            # 文本/代码/PDF/docx：解析 + 切片（P0：纳入 try，独占/损坏文件不再炸整轮）
             for raw in readers.iter_slices(path):
                 for block in chunk_text(raw["text"], self._count_fn):
                     text_clean = _clean(block) or path.stem
