@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { api, SearchResult, SortKey, SearchMode, VideoHit } from "../api";
+import { listen } from "@tauri-apps/api/event";
+import { api, SearchResult, SortKey, SearchMode, VideoHit, SavedQuery } from "../api";
 import {
   IconSearch, IconImage, IconClose, IconSimilar, IconCode,
   IconClock, IconCopy, IconDownload, IconSparkle, IconUpload, IconKeyboard, IconCheck,
@@ -114,6 +115,9 @@ export interface SearchPanelProps {
   sort: SortKey;
   view: "list" | "grid";
   onViewChange: (v: "list" | "grid") => void;
+  /** 保存的查询要能还原检索模式与排序（状态在 App，这里要 setter） */
+  onModeChange?: (m: SearchMode) => void;
+  onSortChange?: (s: SortKey) => void;
 }
 
 /** 路径显示短名：取最后一段（D:\photos → photos；D:\ → D:\） */
@@ -124,7 +128,7 @@ function pathShortName(p: string): string {
 }
 
 export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShowHelp, rootsTick = 0,
-  mode, sort, view, onViewChange }: SearchPanelProps) {
+  mode, sort, view, onViewChange, onModeChange, onSortChange }: SearchPanelProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [ms, setMs] = useState<number | null>(null);
@@ -163,12 +167,71 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   // 索引根目录列表（位置下拉）
   const [rootsList, setRootsList] = useState<string[]>([]);
 
+  // ---- 保存的查询（智能文件夹）----
+  const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
+  const [showSaved, setShowSaved] = useState(false);
+  const [newSavedOpen, setNewSavedOpen] = useState(false);
+  const [newSavedName, setNewSavedName] = useState("");
+  const [savingNew, setSavingNew] = useState(false);
+  // ---- 结果多选 + 批量操作 ----
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState<{ path: string; name: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+  /** 改名等操作后强制重搜（结果里的路径变了） */
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // 检索请求序号：每次发起检索 +1。响应回来时若序号已变（说明期间有更新的
+  // 检索被发起），直接丢弃这份过期结果——否则慢的旧请求会把新结果覆盖掉
+  // （首次检索要加载 ONNX 模型，可能 3-8s，很容易触发）。
+  const reqSeq = useRef(0);
+
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // 全局热键（默认 Ctrl+Alt+Space）：Rust 侧唤起窗口后发这个事件，
+  // 这里把焦点送回搜索框并全选，便于直接改词再搜。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let cancelled = false;
+    try {
+      listen("trace://hotkey", () => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      })
+        .then((fn) => { if (cancelled) fn(); else un = fn; })
+        .catch(() => { /* 非 Tauri 环境（浏览器预览）忽略 */ });
+    } catch {
+      /* 同上 */
+    }
+    return () => { cancelled = true; un?.(); };
+  }, []);
+
+  // 拉取保存的查询
+  const loadSaved = useCallback(async () => {
+    try {
+      const r = await api.savedQueries();
+      setSavedQueries(r.items ?? []);
+    } catch {
+      /* 后端没起来就算了 */
+    }
+  }, []);
+  useEffect(() => { loadSaved(); }, [loadSaved]);
+
   // 拉取索引根目录（mount + 设置里增删后刷新）
+  // 边车刚起来时端口可能还没 listen（首次 import numpy/fastapi 要 1-2s），
+  // 这里失败不静默吞掉：重试几次再放弃，否则"全部位置"下拉会整个会话为空。
   useEffect(() => {
     let alive = true;
-    api.roots().then(r => { if (alive && r.roots) setRootsList(r.roots); }).catch(() => {});
+    let tries = 0;
+    const load = () => {
+      api.roots()
+        .then(r => { if (alive && r.roots) setRootsList(r.roots); })
+        .catch(() => {
+          if (!alive) return;
+          if (tries++ < 5) setTimeout(load, 500 * tries);
+        });
+    };
+    load();
     return () => { alive = false; };
   }, [rootsTick]);
 
@@ -302,8 +365,10 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   //   （打字改补充词时不每键重嵌）；图片模式下文字是联合条件而非切回文字搜索
   // - 文字：150ms 防抖。limit/sort 变化复用同一路径。
   useEffect(() => {
+    // 本次 effect 的序号；期间若发起了新的检索，序号会变，本次的响应作废
+    const seq = ++reqSeq.current;
+    const stale = () => seq !== reqSeq.current;
     if (similarFrom) {
-      let cancelled = false;
       (async () => {
         setLoading(true); setError(null);
         try {
@@ -314,19 +379,19 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             dir: dir || undefined,
             mode,
           });
-          if (cancelled) return;
+          if (stale()) return;
           setResults(r.results);
           setMs(r.ms);
           setFacets(r.facets ?? {});
           setFuzzy(false);
           setSelected(0);
         } catch (e: any) {
-          if (!cancelled) setError(String(e?.message ?? e));
+          if (!stale()) setError(String(e?.message ?? e));
         } finally {
-          if (!cancelled) setLoading(false);
+          if (!stale()) setLoading(false);
         }
       })();
-      return () => { cancelled = true; };
+      return () => { reqSeq.current++; };
     }
     if (imgFile) {
       const text = query.trim();
@@ -341,20 +406,24 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             dir: dir || undefined,
             mode,
           });
+          if (stale()) return;
           setResults(r.results);
           setMs(r.ms);
           setFacets(r.facets ?? {});
           setFuzzy(false);
           setSelected(0);
         } catch (e: any) {
-          setError(String(e?.message ?? e));
+          if (!stale()) setError(String(e?.message ?? e));
         } finally {
-          setLoading(false);
+          if (!stale()) setLoading(false);
         }
       }, 300);
-      return () => clearTimeout(t);
+      return () => { clearTimeout(t); reqSeq.current++; };
     }
-    if (!query.trim()) { setResults([]); setMs(null); setFuzzy(false); setFacets({}); return; }
+    if (!query.trim()) {
+      setResults([]); setMs(null); setFuzzy(false); setFacets({}); setError(null);
+      return () => { reqSeq.current++; };
+    }
     const t = setTimeout(async () => {
       setLoading(true); setError(null);
       try {
@@ -367,19 +436,20 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
           mtime_after: dateRangeToAfter(dateRange),
           mode,
         });
+        if (stale()) return;
         setResults(r.results);
         setMs(r.ms);
         setFacets(r.facets ?? {});
         setFuzzy(r.results.some(x => x.fuzzy_match));
         setSelected(0);
       } catch (e: any) {
-        setError(String(e?.message ?? e));
+        if (!stale()) setError(String(e?.message ?? e));
       } finally {
-        setLoading(false);
+        if (!stale()) setLoading(false);
       }
     }, 150);
-    return () => clearTimeout(t);
-  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, mode, limit, sort]);
+    return () => { clearTimeout(t); reqSeq.current++; };
+  }, [similarFrom, imgFile, query, fileType, dir, threshold, dateRange, mode, limit, sort, refreshTick]);
 
   // 历史记录：查询稳定 2s 后写入（避免打字中间态全部入史）
   useEffect(() => {
@@ -479,15 +549,6 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
   }, [results, selected, showHistory, history, histSel, escapeBack, onShowHelp]);
 
   // ---- 导出 ----
-  const copyPaths = async () => {
-    try {
-      await navigator.clipboard.writeText(results.map(r => r.path).join("\n"));
-      showToast(`已复制 ${results.length} 条路径`);
-    } catch (e) {
-      console.error(e);
-      showToast("复制失败");
-    }
-  };
   const exportCSV = () => {
     const head = "name,path,type,location,score,z,cos,mtime,size,snippet";
     const esc = (x: unknown) => `"${String(x ?? "").replace(/"/g, '""')}"`;
@@ -503,6 +564,171 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
     a.click();
     URL.revokeObjectURL(a.href);
     showToast("CSV 已导出");
+  };
+
+  // ---- 保存的查询（智能文件夹）----
+  const commitSave = async () => {
+    const name = newSavedName.trim();
+    if (!name) return;
+    setSavingNew(true);
+    try {
+      await api.saveSavedQuery(name, query, {
+        file_type: fileType, dir, threshold, dateRange, mode, sort,
+      });
+      await loadSaved();
+      setNewSavedName("");
+      setNewSavedOpen(false);
+      showToast(`已保存「${name}」`);
+    } catch (e: any) {
+      showToast("保存失败：" + String(e?.message ?? e));
+    } finally {
+      setSavingNew(false);
+    }
+  };
+
+  const openSaveForm = () => {
+    setShowSaved(true);
+    setNewSavedOpen(true);
+    if (!newSavedName.trim()) setNewSavedName(query.trim() || "");
+  };
+
+  const applySavedQuery = (sq: SavedQuery) => {
+    const f = sq.filters as Record<string, unknown>;
+    setQuery(sq.query ?? "");
+    setFileType(typeof f.file_type === "string" ? f.file_type : "");
+    setDir(typeof f.dir === "string" ? f.dir : "");
+    setThreshold(typeof f.threshold === "number" ? f.threshold : 0);
+    setDateRange(typeof f.dateRange === "string" ? f.dateRange : "");
+    if (typeof f.mode === "string") onModeChange?.(f.mode as SearchMode);
+    if (typeof f.sort === "string") onSortChange?.(f.sort as SortKey);
+    setShowSaved(false);
+    showToast(`已应用「${sq.name}」`);
+  };
+
+  const removeSavedQuery = async (sq: SavedQuery) => {
+    try {
+      await api.deleteSavedQuery(sq.id);
+      setSavedQueries((prev) => prev.filter((x) => x.id !== sq.id));
+      showToast(`已删除「${sq.name}」`);
+    } catch (e: any) {
+      showToast("删除失败：" + String(e?.message ?? e));
+    }
+  };
+
+  // ---- 结果多选 + 批量操作 ----
+  const togglePick = (path: string) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+  const clearPicks = () => setPicked(new Set());
+
+  /** 当前参与批量操作的结果：勾选了用勾选的，没勾选用全部 */
+  const batchItems = () => (picked.size > 0 ? results.filter((r) => picked.has(r.path)) : results);
+
+  const copyPickedPaths = async () => {
+    const items = batchItems();
+    if (!items.length) return;
+    try {
+      await navigator.clipboard.writeText(items.map((r) => r.path).join("\n"));
+      showToast(`已复制 ${items.length} 条路径`);
+    } catch {
+      showToast("复制失败");
+    }
+  };
+
+  /** 导出为自包含 HTML 报告（图片转 data URL 内嵌，文件单独打开也看得见） */
+  const exportHTML = async () => {
+    const items = batchItems();
+    if (!items.length) return;
+    setBusy(true);
+    try {
+      const thumbs = new Map<string, string>();
+      const imgItems = items.filter((r) => r.file_type === "image").slice(0, 24);
+      for (const r of imgItems) {
+        try { thumbs.set(r.path, await api.rawDataUrl(r.path, 240)); } catch { /* 单张失败跳过 */ }
+      }
+      const esc = (x: unknown) => String(x ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+      const cards = items.map((r) => `
+        <div class="card">
+          ${thumbs.get(r.path) ? `<img src="${thumbs.get(r.path)}" alt="">` : ""}
+          <div class="meta">
+            <div class="name">${esc(r.name)}</div>
+            <div class="path">${esc(r.path)}</div>
+            <div class="tags"><span>${esc(r.file_type)}</span>${r.location ? `<span>@${esc(r.location)}</span>` : ""}
+              <span>score ${r.score.toFixed(3)}</span><span>z ${r.z.toFixed(2)}</span>
+              <span>${esc(fmtDate(r.mtime))}</span><span>${esc(fmtSize(r.size))}</span></div>
+            ${r.snippet ? `<div class="snip">${esc(r.snippet)}</div>` : ""}
+          </div>
+        </div>`).join("\n");
+      const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<title>Trace 检索结果 · ${esc(query.trim() || "全部")}</title>
+<style>
+body{background:#12141a;color:#dfe3ec;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;padding:28px}
+h1{font-size:18px;margin:0 0 4px}p.meta{color:#8b93a7;margin:0 0 22px;font-size:12px}
+.card{display:flex;gap:14px;background:#1a1d26;border:1px solid #262b38;border-radius:10px;padding:12px;margin-bottom:10px}
+.card img{width:96px;height:72px;object-fit:cover;border-radius:6px;background:#0f1116}
+.meta{flex:1;min-width:0}.name{font-weight:600}.path{color:#8b93a7;font-size:12px;word-break:break-all}
+.tags{margin-top:6px;display:flex;gap:8px;flex-wrap:wrap}.tags span{background:#242938;border-radius:4px;padding:1px 7px;font-size:11px;color:#aab2c5}
+.snip{margin-top:6px;color:#c3c9d8;font-size:13px}
+</style></head><body>
+<h1>Trace 检索结果：${esc(query.trim() || "全部结果")}</h1>
+<p class="meta">共 ${items.length} 条 · 导出于 ${esc(new Date().toLocaleString("zh-CN"))}</p>
+${cards}
+</body></html>`;
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `trace_results_${new Date().toISOString().slice(0, 10)}.html`;
+      a.click();
+      // 立即 revoke 会在部分内核上让下载失败（见 P1 清单），延后释放
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast(`HTML 已导出（${items.length} 条）`);
+    } catch (e: any) {
+      showToast("导出失败：" + String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openRename = () => {
+    if (picked.size === 0) {
+      showToast("先勾选要改名的文件（点结果左侧的勾选框）");
+      return;
+    }
+    const items = results.filter((r) => picked.has(r.path));
+    if (!items.length) return;
+    setRenameDraft(items.map((r) => ({ path: r.path, name: r.name })));
+    setRenameOpen(true);
+  };
+
+  const doRename = async () => {
+    const items = renameDraft
+      .filter((d) => d.name.trim() && d.name.trim() !== d.path.split(/[\\/]/).pop())
+      .map((d) => ({ path: d.path, new_name: d.name.trim() }));
+    if (!items.length) { setRenameOpen(false); return; }
+    setBusy(true);
+    try {
+      const r = await api.renameFiles(items);
+      const failed = (r.results ?? []).filter((x) => !x.ok);
+      if (failed.length) {
+        showToast(`${failed.length} 个改名失败：${failed[0].error ?? "未知错误"}`);
+      } else {
+        showToast(`已改名 ${items.length} 个文件`);
+      }
+      setRenameOpen(false);
+      clearPicks();
+      // 改名后索引已同步（后端 store.rename_path），重新搜一次让列表刷新
+      setRefreshTick((t) => t + 1);
+    } catch (e: any) {
+      showToast("改名失败：" + String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const active = !!imgFile || !!similarFrom || !!query.trim();
@@ -746,8 +972,76 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
 
       {results.length > 0 && (
         <div className="search-actions">
-          <button className="btn-xs" onClick={copyPaths}><IconCopy size={12} /> 复制路径</button>
+          <button className="btn-xs" onClick={copyPickedPaths}>
+            <IconCopy size={12} /> {picked.size > 0 ? `复制 ${picked.size} 条路径` : "复制路径"}
+          </button>
+          <button className="btn-xs" onClick={openRename} disabled={busy}
+            title="就地改名（不移动目录），改完立即同步索引">
+            <IconSparkle size={12} /> 批量重命名
+          </button>
           <button className="btn-xs" onClick={exportCSV}><IconDownload size={12} /> 导出 CSV</button>
+          <button className="btn-xs" onClick={exportHTML} disabled={busy}
+            title="导出成单文件 HTML 报告（图片内嵌，双击即可看）">
+            <IconDownload size={12} /> 导出 HTML
+          </button>
+          <span className="act-sep" />
+          <button className="btn-xs" onClick={openSaveForm}
+            title="保存当前查询词 + 筛选条件，之后一键复用（结果随文件变化自动更新）">
+            <IconCheck size={12} /> 保存查询
+          </button>
+          <div className="saved-wrap">
+            <button className={"btn-xs" + (showSaved ? " active" : "")}
+              onClick={() => { setShowSaved(v => !v); if (!showSaved) loadSaved(); }}>
+              ★ 已保存{savedQueries.length ? ` (${savedQueries.length})` : ""}
+            </button>
+            {showSaved && (
+              <div className="saved-pop">
+                {newSavedOpen && (
+                  <div className="saved-new">
+                    <input
+                      className="saved-new-input"
+                      autoFocus
+                      value={newSavedName}
+                      placeholder="给这组查询起个名字"
+                      onChange={(e) => setNewSavedName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); commitSave(); }
+                        if (e.key === "Escape") { e.preventDefault(); setNewSavedOpen(false); }
+                      }}
+                    />
+                    <button className="btn-xs primary" onClick={commitSave}
+                      disabled={!newSavedName.trim() || savingNew}>
+                      {savingNew ? "…" : "保存"}
+                    </button>
+                    <button className="btn-xs" onClick={() => setNewSavedOpen(false)}>取消</button>
+                  </div>
+                )}
+                {savedQueries.length === 0 && !newSavedOpen && (
+                  <div className="saved-empty">还没有保存的查询</div>
+                )}
+                {savedQueries.map(sq => (
+                  <div key={sq.id} className="saved-item">
+                    <button className="saved-apply" onClick={() => applySavedQuery(sq)} title={sq.query}>
+                      <span className="saved-name">{sq.name}</span>
+                      <span className="saved-q">{sq.query || "（无查询词）"}</span>
+                    </button>
+                    <button className="saved-del" onClick={() => removeSavedQuery(sq)} title="删除">
+                      <IconClose size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {picked.size > 0 && (
+            <>
+              <span className="act-pick-count">已选 {picked.size} 项</span>
+              <button className="btn-xs" onClick={() => setPicked(new Set(results.map((r) => r.path)))}>
+                全选本页
+              </button>
+              <button className="btn-xs" onClick={clearPicks}>取消选择</button>
+            </>
+          )}
         </div>
       )}
 
@@ -794,6 +1088,10 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
                 <div className="grid-thumb-wrap">
                   {renderThumb(r, 400)}
                   {r.location && <span className="grid-loc">@{r.location}</span>}
+                  <label className="pick-box grid-pick" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={picked.has(r.path)}
+                      onChange={() => togglePick(r.path)} />
+                  </label>
                 </div>
                 <div className="grid-name" title={r.path}>{r.name}</div>
                 <div className="grid-meta">
@@ -820,6 +1118,10 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
             onMouseEnter={() => setSelected(i)}
           >
             <div className="result-body">
+              <label className="pick-box" onClick={(e) => e.stopPropagation()}>
+                <input type="checkbox" checked={picked.has(r.path)}
+                  onChange={() => togglePick(r.path)} />
+              </label>
               {r.file_type === "image" && (
                 <img
                   className="result-thumb"
@@ -899,6 +1201,40 @@ export function SearchPanel({ onPlayVideo, onPreviewImage, onPreviewFile, onShow
         <div className="toast">
           <IconCheck size={14} />
           {toast}
+        </div>
+      )}
+
+      {renameOpen && (
+        <div className="overlay rename-overlay" onClick={() => !busy && setRenameOpen(false)}>
+          <div className="rename-card" onClick={(e) => e.stopPropagation()}>
+            <div className="rename-title">批量重命名（{renameDraft.length} 个文件）</div>
+            <div className="rename-hint">
+              就地改名，不移动目录。文件名不能含 <code>\ / : * ? " &lt; &gt; |</code>；
+              目标已存在时会跳过并报错。改完立即同步索引。
+            </div>
+            <div className="rename-list">
+              {renameDraft.map((d, i) => (
+                <div key={d.path} className="rename-row">
+                  <span className="rename-dir" title={d.path}>
+                    {d.path.replace(/[\\/][^\\/]*$/, "")}
+                  </span>
+                  <input
+                    className="rename-input"
+                    value={d.name}
+                    autoFocus={i === 0}
+                    onChange={(e) => setRenameDraft((prev) =>
+                      prev.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="rename-actions">
+              <button className="btn-xs" onClick={() => setRenameOpen(false)} disabled={busy}>取消</button>
+              <button className="btn-xs primary" onClick={doRename} disabled={busy}>
+                {busy ? "处理中…" : "确认改名"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

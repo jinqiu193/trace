@@ -3,10 +3,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
+use tauri_plugin_global_shortcut::{
+    Builder as HotkeyBuilder, GlobalShortcutExt, Shortcut, ShortcutState,
+};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -15,11 +19,41 @@ use std::os::windows::process::CommandExt;
 struct BackendState {
     port: Mutex<Option<u16>>,
     child: Mutex<Option<std::process::Child>>,
+    /// 边车 stdin 管道的写端：必须一直存活，否则边车读到 EOF 会自杀。
+    /// 父进程退出时 OS 关闭写端 → 边车感知到并退出（不留孤儿边车）。
+    stdin_keepalive: Mutex<Option<std::process::ChildStdin>>,
 }
 
 impl BackendState {
     fn new() -> Self {
-        Self { port: Mutex::new(None), child: Mutex::new(None) }
+        Self {
+            port: Mutex::new(None),
+            child: Mutex::new(None),
+            stdin_keepalive: Mutex::new(None),
+        }
+    }
+}
+
+/// 全局热键事件名（前端 listen 这个名字来聚焦搜索框）。
+const HOTKEY_EVENT: &str = "trace://hotkey";
+
+/// 全局热键加速键。默认 Ctrl+Alt+Space；环境变量 TRACE_HOTKEY 可覆盖
+/// （如 "Ctrl+Shift+F"、"CmdOrControl+Space"）；设为 "off" / 空则不注册。
+fn hotkey_accelerator() -> Option<String> {
+    let raw = std::env::var("TRACE_HOTKEY").unwrap_or_else(|_| "Ctrl+Alt+Space".into());
+    let raw = raw.trim().to_string();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(raw)
+}
+
+/// 显示 + 聚焦主窗口。全局热键、第二实例启动都走这里。
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
     }
 }
 
@@ -187,6 +221,11 @@ pub fn run() {
         .current_dir(&proj)
         // 安装版：config.py 经此变量定位 models / trace.db（源码在 PyInstaller 包内，__file__ 不可用）
         .env("TRACE_PROJECT_ROOT", &proj)
+        // 父进程看门狗：stdin 接成管道，写端由本进程持有；本进程退出时写端关闭，
+        // 边车读到 EOF 即自杀（否则 std::process::exit(0) 这类不触发 RunEvent::Exit
+        // 的路径会留下孤儿边车，两个边车重复索引同一批目录）。
+        .env("TRACE_PARENT_WATCHDOG", "1")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -246,14 +285,44 @@ pub fn run() {
 
     eprintln!("[trace] sidecar ready on http://127.0.0.1:{}", port);
     *backend.child.lock().unwrap() = Some(child);
+    // 保住 stdin 写端：一旦 drop，边车立刻读到 EOF 并退出
+    if let Some(child) = backend.child.lock().unwrap().as_mut() {
+        if let Some(si) = child.stdin.take() {
+            *backend.stdin_keepalive.lock().unwrap() = Some(si);
+        }
+    }
 
     let app = tauri::Builder::default()
+        // 单实例插件必须最先注册：第二个实例启动时它会把参数转发给主实例
+        // 并让本进程退出（避免两个边车重复索引同一批目录）。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            eprintln!("[trace] second instance detected — focusing existing window");
+            focus_main_window(app);
+        }))
+        .plugin(HotkeyBuilder::new().with_handler(|app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                focus_main_window(app);
+                let _ = app.emit(HOTKEY_EVENT, ());
+            }
+        }).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
         .invoke_handler(tauri::generate_handler![backend_url, open_path, reveal_in_folder])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
+
+    // 注册全局热键（失败不致命：可能已被另一实例占用）
+    match hotkey_accelerator() {
+        Some(accel) => match Shortcut::from_str(&accel) {
+            Ok(shortcut) => match app.global_shortcut().register(shortcut) {
+                Ok(()) => eprintln!("[trace] global hotkey registered: {}", accel),
+                Err(e) => eprintln!("[trace] global hotkey register failed ({}): {}", accel, e),
+            },
+            Err(e) => eprintln!("[trace] invalid TRACE_HOTKEY {:?}: {}", accel, e),
+        },
+        None => eprintln!("[trace] global hotkey disabled"),
+    }
 
     // 给前端最多 60s 启动时间（首次 ONNX 加载可能要 10s）
     let _ = Duration::from_secs(60); // 占位用，避免 unused 警告

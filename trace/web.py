@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -33,6 +33,76 @@ from .store import Store
 from .tasks import IndexTaskManager
 
 log = logging.getLogger("trace.web")
+
+
+# --------------------------------------------------------------------- #
+# 跨站调用防护
+# --------------------------------------------------------------------- #
+# 边车监听 127.0.0.1 且 CORS 放开为 "*"，浏览器里任意网页都能往
+# 127.0.0.1:8765 发请求（写操作会触发预检，但预检同样被放行）。只读接口
+# 无所谓；删索引、重命名文件这类破坏性接口必须挡住外部站点。
+#
+# 判据：浏览器发起的跨源请求一定带 Origin 头，且是那个网站的地址；
+# 本地工具（curl / CLI）不带 Origin；Tauri WebView 带的是本地来源。
+_LOCAL_ORIGINS = {
+    "null",                       # 沙箱 iframe 等不透明来源
+    "tauri://localhost",          # Tauri 2 macOS/Linux
+    "http://tauri.localhost",     # Tauri 2 Windows
+}
+
+
+def _origin_allowed(origin: str) -> bool:
+    o = origin.strip().lower()
+    if not o or o in _LOCAL_ORIGINS:
+        return True
+    if o.startswith("http://127.0.0.1:") or o.startswith("http://localhost:"):
+        return True
+    if o in ("http://127.0.0.1", "http://localhost"):
+        return True
+    return False
+
+
+def require_local_origin(request: Request) -> None:
+    """破坏性接口的来源校验：非本地来源直接 403。"""
+    origin = request.headers.get("origin")
+    if origin and not _origin_allowed(origin):
+        raise HTTPException(403, f"origin not allowed: {origin}")
+
+
+def _start_parent_watchdog() -> None:
+    """父进程退出 → 边车自杀。
+
+    Tauri 主进程把子进程 stdin 接成管道并一直持有写端：主进程一旦退出
+    （包括 std::process::exit(0) 这种不触发 RunEvent::Exit 的路径），写端
+    被 OS 关闭 → 这里读到 EOF → 边车退出。否则会留下孤儿边车：两个边车
+    同时对同一批 root 跑 watcher，重复索引、还会各自缓存一份向量矩阵
+    （边车的内存缓存不会因别的进程写库而失效）。
+
+    仅在 TRACE_PARENT_WATCHDOG=1 时启用（由 Tauri 主进程设置）；
+    手动 `python webserver.py` 运行时 stdin 是终端，不启用。
+
+    2026-11-05 修：**必须在应用完全导入之后再启动这个线程**。
+    原先它在 webserver.py 的 main() 里、import uvicorn 之前就起，导致它
+    阻塞读 stdin 的那一刻，主线程正在 import trace.web → numpy 的 C 扩展
+    初始化（DLL 加载 + 导入锁）；两者互相拖死——实测主线程卡在
+    `ExtensionFileLoader.create_module` 里出不来，进程只用了 1.1s CPU、
+    占 50MB，端口 listen 了但 uvicorn 从未开始服务（所有 API 请求超时）。
+    现在由 lifespan 在应用导入完成后调用。
+    """
+    import os
+    import threading
+
+    def _watch() -> None:
+        try:
+            while True:
+                # os.read 是裸系统调用（释放 GIL），不走 TextIOWrapper
+                data = os.read(0, 1)
+                if not data:      # EOF：父进程已退出
+                    os._exit(0)
+        except Exception:
+            pass
+
+    threading.Thread(target=_watch, name="parent-watchdog", daemon=True).start()
 
 
 class State:
@@ -91,11 +161,30 @@ class RootBody(BaseModel):
     path: str = Field(..., min_length=1)
 
 
+class SavedQueryBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    query: str = ""
+    filters: dict = Field(default_factory=dict)
+
+
+class RenameItem(BaseModel):
+    path: str = Field(..., min_length=1)
+    new_name: str = Field(..., min_length=1)
+
+
+class RenameBody(BaseModel):
+    items: list[RenameItem] = Field(default_factory=list)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state = State()
     state.store = Store(check_same_thread=False)
     app.state.trace = state
+    # 父进程看门狗：必须等应用（连同 numpy 的 C 扩展）完全导入之后再起，
+    # 否则会和主线程的扩展初始化互相拖死（见 _start_parent_watchdog 注释）
+    if os.environ.get("TRACE_PARENT_WATCHDOG") == "1":
+        _start_parent_watchdog()
     watcher = None
     if config.WATCH_ENABLED:
         from .watcher import RootWatcher
@@ -103,13 +192,18 @@ async def lifespan(app: FastAPI):
         watcher.start()
 
     def _warm() -> None:
-        # 后台预热：① Embedder 构造（冷进程 ~9s：模型磁盘冷读 + dll 初始化），
-        # 否则全部压在用户首次搜索上；② scipy.signal 冷导入（实测 4.2s，
-        # 首个音频窗口的 mel 会被它卡住）。均不阻塞 uvicorn 起服务。
-        try:
-            from scipy.signal import stft  # noqa: F401
-        except Exception:
-            pass
+        # 后台预热：Embedder 构造（冷进程 ~9s：模型磁盘冷读 + dll 初始化），
+        # 否则全部压在用户首次搜索上。
+        #
+        # 2026-11-05 修：**这里绝不做重量级 C 扩展导入**（原来还有
+        # `from scipy.signal import stft`）。后台线程导入 C 扩展时会持有 GIL
+        # 并卡在原生等待里，而主线程此时要拿 GIL 去启动 anyio 的工作线程
+        # （anyio.run_sync_in_worker_thread → Thread.start）→ 永久死锁：
+        # 现象是端口 listen 了但 uvicorn 永不开始服务，所有 API 请求超时，
+        # py-spy 看到主线程停在 Thread.start、预热线程停在
+        # ExtensionFileLoader.create_module。
+        # 现在：C 扩展一律在主线程导入（见 embedder.py 的模块级 import），
+        # 后台线程只做模型加载（不再涉及 import）。
         try:
             state.get_embedder()
         except Exception:
@@ -331,7 +425,8 @@ def duplicates(threshold: float = 0.95) -> dict:
 # 索引：后台任务（异步） + 进度 + 取消
 # --------------------------------------------------------------------- #
 @app.post("/api/index")
-def index(body: IndexBody) -> dict:
+def index(body: IndexBody, request: Request) -> dict:
+    require_local_origin(request)
     s = _state()
     p = Path(body.path)
     if not p.is_dir():
@@ -363,7 +458,8 @@ def list_roots() -> dict:
 
 
 @app.post("/api/roots")
-def add_root(body: RootBody) -> dict:
+def add_root(body: RootBody, request: Request) -> dict:
+    require_local_origin(request)
     s = _state()
     p = Path(body.path)
     if not p.is_dir():
@@ -373,21 +469,95 @@ def add_root(body: RootBody) -> dict:
 
 
 @app.delete("/api/roots/{path:path}")
-def remove_root(path: str) -> dict:
+def remove_root(path: str, request: Request) -> dict:
+    require_local_origin(request)
     s = _state()
     ok = s.store.remove_root(path)
     return {"ok": ok, "path": path}
 
 
 @app.delete("/api/files")
-def delete_file(path: str) -> dict:
+def delete_file(path: str, request: Request) -> dict:
+    require_local_origin(request)
     s = _state()
     ok = s.store.delete_file(path)
     return {"ok": ok, "path": path}
 
 
+# --------------------------------------------------------------------- #
+# 批量重命名：把选中的结果改名，并同步更新索引
+# --------------------------------------------------------------------- #
+_BAD_NAME_CHARS = set('/\\:*?"<>|')
+
+
+@app.post("/api/files/rename")
+def rename_files(body: RenameBody, request: Request) -> dict:
+    """批量改名。就地改名（不移动目录）。
+
+    逐项返回结果，失败不影响其他项；改名后立即同步索引路径，
+    搜索当场就能命中新文件名。
+    """
+    require_local_origin(request)
+    s = _state()
+    results: list[dict] = []
+    for item in body.items:
+        src = Path(item.path)
+        name = (item.new_name or "").strip()
+        entry = {"path": item.path, "new_name": name}
+        try:
+            if not name or name in (".", ".."):
+                raise ValueError("文件名不能为空")
+            if any(ch in _BAD_NAME_CHARS for ch in name):
+                raise ValueError("文件名不能包含路径分隔符或 \\/:*?\"<>| ")
+            if not src.exists():
+                raise FileNotFoundError(f"文件不存在：{src}")
+            dst = src.with_name(name)
+            if dst == src:
+                entry.update(ok=True, skipped=True)
+                results.append(entry)
+                continue
+            if dst.exists():
+                raise FileExistsError(f"目标已存在：{dst.name}")
+            src.rename(dst)
+            s.store.rename_path(str(src), str(dst))
+            entry.update(ok=True, new_path=str(dst))
+        except Exception as e:
+            entry.update(ok=False, error=str(e))
+            log.warning("改名失败 %s -> %s: %s", item.path, name, e)
+        results.append(entry)
+    return {"ok": all(r.get("ok") for r in results) if results else True, "results": results}
+
+
+# --------------------------------------------------------------------- #
+# 保存的查询（智能文件夹）
+# --------------------------------------------------------------------- #
+@app.get("/api/saved-queries")
+def list_saved_queries() -> dict:
+    s = _state()
+    return {"items": s.store.list_saved_queries()}
+
+
+@app.post("/api/saved-queries")
+def save_saved_query(body: SavedQueryBody, request: Request) -> dict:
+    require_local_origin(request)
+    s = _state()
+    try:
+        item = s.store.save_saved_query(body.name, body.query, body.filters)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/saved-queries/{qid}")
+def delete_saved_query(qid: int, request: Request) -> dict:
+    require_local_origin(request)
+    s = _state()
+    return {"ok": s.store.delete_saved_query(qid)}
+
+
 @app.post("/api/reindex")
-def reindex_all(full: bool = False) -> dict:
+def reindex_all(request: Request, full: bool = False) -> dict:
+    require_local_origin(request)
     s = _state()
     roots = s.store.list_roots()
     if not roots:

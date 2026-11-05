@@ -42,8 +42,17 @@ const SECTIONS: { title: string; rows: [React.ReactNode, string][] }[] = [
   {
     title: "全局",
     rows: [
+      [<><K>Ctrl</K> <K>Alt</K> <K>Space</K></>, "全局热键：任何软件里按下即唤起 Trace 并聚焦搜索框（可用环境变量 TRACE_HOTKEY 改）"],
       [<K>?</K>, "打开本帮助"],
       [<K>Esc</K>, "关闭弹窗"],
+    ],
+  },
+  {
+    title: "结果批量操作",
+    rows: [
+      [<K>点结果左侧勾选框</K>, "多选结果（可全选本页）"],
+      [<K>批量重命名</K>, "就地改名，改完立即同步索引"],
+      [<K>导出 HTML</K>, "导出单文件报告（图片内嵌，双击即可看）"],
     ],
   },
 ];

@@ -103,7 +103,7 @@ pnpm tauri dev      # dev mode
 pnpm tauri build    # produce .msi + NSIS .exe installers
 ```
 
-Desktop features implemented: index-scope management (FR-1), global search panel with 100 ms debounce + keyboard navigation (FR-6), filters by file type / directory / mtime / similarity threshold (FR-7), open-in-system-app precise locating (FR-5), `name:` exact filename search, `code:` code-aware search, search-by-image (drag & drop / Ctrl+V paste / image+text refinement), More-like-this recommendations, in-app previews (video seek / image zoom & paging / text highlight / audio playback), duplicate-image detection, fast/detailed search modes, and 60 s file-change polling for incremental indexing. A global hotkey is on the roadmap.
+Desktop features implemented: index-scope management (FR-1), global search panel with 100 ms debounce + keyboard navigation (FR-6), filters by file type / directory / mtime / similarity threshold (FR-7), open-in-system-app precise locating (FR-5), `name:` exact filename search, `code:` code-aware search, search-by-image (drag & drop / Ctrl+V paste / image+text refinement), More-like-this recommendations, in-app previews (video seek / image zoom & paging / text highlight / audio playback), duplicate-image detection, fast/detailed search modes, 60 s file-change polling for incremental indexing, a **global hotkey** (`Ctrl+Alt+Space` by default, override with the `TRACE_HOTKEY` env var — raises Trace from any app and focuses the search box), **saved queries / smart folders** (store a query plus its filters, reuse in one click, results refresh as files change), and **batch result actions** (multi-select → copy paths / rename in place / export CSV or a self-contained HTML report).
 
 ## Benchmarks
 

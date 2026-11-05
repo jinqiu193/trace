@@ -123,13 +123,40 @@ export interface DuplicatesResponse {
   file_count: number;
 }
 
+/** 保存的查询（智能文件夹）：查询词 + 筛选条件，可一键复用 */
+export interface SavedQuery {
+  id: number;
+  name: string;
+  query: string;
+  filters: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RenameResult {
+  path: string;
+  new_name: string;
+  ok: boolean;
+  skipped?: boolean;
+  new_path?: string;
+  error?: string;
+}
+
 let _port: number | null = null;
 let _base: string | null = null;
 
+/** 浏览器预览兜底端口（`pnpm dev` 在普通浏览器里跑时用） */
+const BROWSER_FALLBACK_PORT = 8765;
+
 async function base(): Promise<string> {
   if (_base) return _base;
-  _port = await invoke<number>("backend_url");
-  _base = `http://127.0.0.1:${_port}`;
+  try {
+    _port = await invoke<number>("backend_url");
+    _base = `http://127.0.0.1:${_port}`;
+  } catch {
+    // 不在 Tauri 里（浏览器预览 / vite dev）：退到固定端口
+    _base = `http://127.0.0.1:${BROWSER_FALLBACK_PORT}`;
+  }
   return _base;
 }
 
@@ -207,13 +234,34 @@ export const api = {
     json<{ ok: boolean; queued: number; roots: string[]; full: boolean }>("POST", `/api/reindex?full=${full}`, {}),
   roots: () => json<{ roots: string[] }>("GET", "/api/roots"),
   addRoot: (path: string) => json<{ ok: boolean; path: string }>("POST", "/api/roots", { path }),
-  removeRoot: (path: string) => json<{ ok: boolean; path: string }>("DELETE", `/api/roots/${encodeURI(path)}`),
+  removeRoot: (path: string) => json<{ ok: boolean; path: string }>("DELETE", `/api/roots/${encodeURIComponent(path)}`),
+  /** 保存的查询（智能文件夹） */
+  savedQueries: () => json<{ items: SavedQuery[] }>("GET", "/api/saved-queries"),
+  saveSavedQuery: (name: string, query: string, filters: Record<string, unknown>) =>
+    json<{ ok: boolean; item: SavedQuery }>("POST", "/api/saved-queries", { name, query, filters }),
+  deleteSavedQuery: (id: number) => json<{ ok: boolean }>("DELETE", `/api/saved-queries/${id}`),
+  /** 批量改名（就地，不移动目录） */
+  renameFiles: (items: { path: string; new_name: string }[]) =>
+    json<{ ok: boolean; results: RenameResult[] }>("POST", "/api/files/rename", { items }),
   openPath: (path: string, location?: string) => invoke<void>("open_path", { path, location }),
   revealInFolder: (path: string) => invoke<void>("reveal_in_folder", { path }),
   /** 内嵌图片预览 URL（需等 baseUrl() 就绪） */
   imageSrc: (path: string, max_w: number = 0) => {
     const qs = max_w > 0 ? `&max_w=${max_w}` : "";
     return `${_base}/api/raw?path=${encodeURIComponent(path)}${qs}`;
+  },
+  /** 图片 → data URL（导出自包含 HTML 报告用） */
+  rawDataUrl: async (path: string, max_w: number = 240): Promise<string> => {
+    const b = await base();
+    const r = await fetch(`${b}/api/raw?path=${encodeURIComponent(path)}&max_w=${max_w}`);
+    if (!r.ok) throw new Error(`GET /api/raw → ${r.status}`);
+    const blob = await r.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
   },
   /** 通用文件流 URL（音频/PDF 内嵌预览；FileResponse 支持 Range 拖动） */
   fileSrc: (path: string) => `${_base}/api/file?path=${encodeURIComponent(path)}`,

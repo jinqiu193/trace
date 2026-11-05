@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, IndexStats, IndexTaskStatus } from "../api";
 import { IconPlus, IconRefresh, IconTrash, IconStop } from "../icons";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export function RootManager({ onChanged }: { onChanged?: () => void }) {
   const [roots, setRoots] = useState<string[]>([]);
@@ -10,6 +11,10 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
   const [task, setTask] = useState<IndexTaskStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const handledRef = useRef<string | null>(null);
+  // 确认对话框（不用 window.confirm：WebView2 不接管 JS 对话框，恒返回 false）
+  const [confirmRoot, setConfirmRoot] = useState<string | null>(null);
+  const [confirmRebuild, setConfirmRebuild] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
@@ -83,30 +88,45 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
   };
 
   const removeRoot = async (path: string) => {
-    if (!confirm(`从索引中移除？\n${path}\n（不会删除原文件）`)) return;
+    setConfirmRoot(path);
+  };
+
+  const doRemoveRoot = async (path: string) => {
+    setConfirmRoot(null);
     try {
       await api.removeRoot(path);
       await refresh();
       onChanged?.();
     } catch (e: any) {
-      alert("移除失败：" + String(e?.message ?? e));
+      setError("移除失败：" + String(e?.message ?? e));
     }
   };
 
   const reindexAll = async (full = false) => {
     if (roots.length === 0) return;
-    if (full && !confirm("全量重建会重新嵌入所有文件（大视频/音频可能要很久）。\n通常只需「刷新」即可同步新增/修改的文件。确定全量重建？")) return;
+    if (full) { setConfirmRebuild(true); return; }
     setBusy(true);
     try {
-      await api.reindexAll(full);   // 后台任务，立即返回（watcher 自动任务会被抢占）
+      await api.reindexAll(false);   // 后台任务，立即返回（watcher 自动任务会被抢占）
+      onChanged?.();
+    } catch (e: any) {
+      setError("刷新失败：" + String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRebuildAll = async () => {
+    setConfirmRebuild(false);
+    setBusy(true);
+    try {
+      await api.reindexAll(true);
       onChanged?.();
     } catch (e: any) {
       const msg = String(e?.message ?? e);
-      if (msg.includes("409")) {
-        alert("已有索引任务进行中，请等它完成，或先点「取消任务」再重建。");
-      } else {
-        alert((full ? "全量重建失败：" : "刷新失败：") + msg);
-      }
+      setError(msg.includes("409")
+        ? "已有索引任务进行中，请等它完成，或先点「取消任务」再重建。"
+        : "全量重建失败：" + msg);
     } finally {
       setBusy(false);
     }
@@ -174,6 +194,28 @@ export function RootManager({ onChanged }: { onChanged?: () => void }) {
           );
         })}
       </div>
+      {error && <div className="root-error">{error}</div>}
+
+      {confirmRoot && (
+        <ConfirmDialog
+          title="从索引中移除？"
+          message={<>索引里会删掉 <code>{confirmRoot}</code> 的全部条目。<br />不会删除磁盘上的原文件。</>}
+          confirmText="移除"
+          danger
+          onConfirm={() => doRemoveRoot(confirmRoot)}
+          onCancel={() => setConfirmRoot(null)}
+        />
+      )}
+      {confirmRebuild && (
+        <ConfirmDialog
+          title="全量重建？"
+          message={<>所有文件会重新切片 + 重新嵌入（大视频/音频可能要很久）。<br />通常只需「刷新」即可同步新增/修改的文件。</>}
+          confirmText="全量重建"
+          danger
+          onConfirm={doRebuildAll}
+          onCancel={() => setConfirmRebuild(false)}
+        />
+      )}
     </div>
   );
 }

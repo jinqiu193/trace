@@ -101,6 +101,8 @@ export default function App() {
           sort={sort}
           view={view}
           onViewChange={setView}
+          onModeChange={switchMode}
+          onSortChange={setSort}
         />
       </main>
       <StatusBar tick={statusTick} />

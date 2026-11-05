@@ -1911,3 +1911,271 @@ select:focus-visible {
   background: var(--accent-soft);
   color: var(--accent-2);
 }
+
+/* ---- 保存的查询（智能文件夹）---- */
+.saved-wrap { position: relative; display: inline-flex; }
+.btn-xs.active {
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  border-color: var(--accent);
+}
+.act-sep {
+  width: 1px;
+  height: 16px;
+  align-self: center;
+  background: var(--border-2);
+  margin: 0 2px;
+}
+.act-pick-count {
+  align-self: center;
+  font-size: 11px;
+  color: var(--fg-2);
+  padding: 0 2px;
+}
+.saved-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 240px;
+  max-width: 380px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  padding: 5px;
+}
+.saved-empty {
+  padding: 12px 10px;
+  font-size: 11px;
+  color: var(--fg-3);
+  text-align: center;
+}
+.saved-item {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: 7px;
+}
+.saved-item:hover { background: var(--bg-hover); }
+.saved-apply {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  align-items: flex-start;
+  background: none;
+  border: none;
+  color: var(--fg);
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.saved-name {
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-q {
+  font-size: 11px;
+  color: var(--fg-3);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-del {
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 0 7px;
+  display: flex;
+  align-items: center;
+}
+.saved-del:hover { color: var(--danger, #e07a7a); }
+
+/* ---- 结果多选 ---- */
+.pick-box {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  padding-top: 12px;
+  flex: 0 0 auto;
+}
+.pick-box input {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+.grid-pick {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding-top: 0;
+  background: rgba(10, 11, 16, 0.62);
+  border-radius: 5px;
+  padding: 3px;
+}
+
+/* ---- 批量重命名弹窗 ---- */
+.rename-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 8, 13, 0.62);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+  animation: fadeIn 0.18s var(--ease);
+}
+.rename-card {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px 16px;
+  gap: 10px;
+}
+.rename-title { font-size: 14px; font-weight: 600; }
+.rename-hint { font-size: 11px; color: var(--fg-3); line-height: 1.6; }
+.rename-hint code {
+  background: var(--bg-2);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--fg-2);
+}
+.rename-list {
+  overflow-y: auto;
+  max-height: 52vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+.rename-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rename-dir {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.rename-input {
+  flex: 1;
+  min-width: 180px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  color: var(--fg);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.rename-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+.btn-xs.primary {
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  border-color: var(--accent);
+}
+
+/* ---- 应用内确认对话框 ---- */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 8, 13, 0.62);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 950;
+  animation: fadeIn 0.18s var(--ease);
+}
+.confirm-card {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  width: min(460px, 92vw);
+  padding: 18px 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.confirm-title { font-size: 14px; font-weight: 600; }
+.confirm-message { font-size: 12px; color: var(--fg-2); line-height: 1.7; word-break: break-all; }
+.confirm-message code {
+  background: var(--bg-2);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--fg);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+.btn-xs.danger {
+  background: rgba(224, 122, 122, 0.14);
+  color: #e79a9a;
+  border-color: rgba(224, 122, 122, 0.45);
+}
+.root-error {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #e79a9a;
+  line-height: 1.6;
+}
+.saved-new {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  padding: 5px 5px 8px;
+  border-bottom: 1px solid var(--border-2);
+  margin-bottom: 5px;
+}
+.saved-new-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-3, #1a1d26);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: 4px 7px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.saved-new-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}

@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS roots (
     path TEXT PRIMARY KEY, added_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- 保存的查询（智能文件夹）：名字 + 查询词 + 筛选条件 JSON
+CREATE TABLE IF NOT EXISTS saved_queries (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    query      TEXT NOT NULL DEFAULT '',
+    filters    TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_slices_file ON slices(file_id);
 
 """
@@ -461,6 +470,111 @@ class Store:
                     if self.delete_file(p):
                         n += 1
         return n
+
+    # ------------------------------------------------------------------ #
+    # 保存的查询（智能文件夹）
+    # ------------------------------------------------------------------ #
+    def list_saved_queries(self) -> list[dict]:
+        """全部保存的查询，按最近更新排序。"""
+        import json
+
+        out: list[dict] = []
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT id, name, query, filters, created_at, updated_at
+                   FROM saved_queries ORDER BY updated_at DESC, id DESC"""
+            ).fetchall()
+        for r in rows:
+            try:
+                filters = json.loads(r["filters"] or "{}")
+            except Exception:
+                filters = {}
+            if not isinstance(filters, dict):
+                filters = {}
+            out.append({
+                "id": r["id"], "name": r["name"], "query": r["query"] or "",
+                "filters": filters,
+                "created_at": r["created_at"], "updated_at": r["updated_at"],
+            })
+        return out
+
+    def save_saved_query(self, name: str, query: str, filters: dict) -> dict:
+        """按名字 upsert 一个保存的查询（同名覆盖）。"""
+        import json
+
+        nm = (name or "").strip()
+        if not nm:
+            raise ValueError("名称不能为空")
+        payload = json.dumps(filters or {}, ensure_ascii=False)
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id FROM saved_queries WHERE name=?", (nm,)).fetchone()
+            if row:
+                self.db.execute(
+                    "UPDATE saved_queries SET query=?, filters=?, updated_at=? WHERE id=?",
+                    (query or "", payload, _now(), row["id"]),
+                )
+                qid = row["id"]
+            else:
+                cur = self.db.execute(
+                    "INSERT INTO saved_queries(name, query, filters, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (nm, query or "", payload, _now(), _now()),
+                )
+                qid = cur.lastrowid
+            self._commit()
+        return {"id": qid, "name": nm, "query": query or "", "filters": filters or {}}
+
+    def delete_saved_query(self, qid: int) -> bool:
+        with self._lock:
+            cur = self.db.execute("DELETE FROM saved_queries WHERE id=?", (qid,))
+            self._commit()
+            return cur.rowcount > 0
+
+    # ------------------------------------------------------------------ #
+    # 文件改名后同步索引
+    # ------------------------------------------------------------------ #
+    def rename_path(self, old_path: str, new_path: str) -> bool:
+        """文件改名后同步索引：更新 files.path/name，并把切片里出现的旧文件名
+        替换成新名（keywords / text_snippet 含文件名，改名后 FTS 才命中新名）。
+
+        watcher 也会在下一轮发现"旧路径消失 + 新路径出现"并重索，但那是 60s
+        之后的事；这里立即同步，搜索结果当场可用。
+        """
+        with self._lock:
+            row = self.db.execute(
+                "SELECT file_id FROM files WHERE path=?", (old_path,)).fetchone()
+            if row is None:
+                return False
+            fid = row["file_id"]
+            old_stem = Path(old_path).stem
+            new_stem = Path(new_path).stem
+            self.db.execute(
+                "UPDATE files SET path=?, name=?, indexed_at=? WHERE file_id=?",
+                (new_path, Path(new_path).name, _now(), fid),
+            )
+            if old_stem and old_stem != new_stem:
+                for r in self.db.execute(
+                    "SELECT slice_id, text_snippet, keywords FROM slices WHERE file_id=?",
+                    (fid,),
+                ).fetchall():
+                    txt = (r["text_snippet"] or "").replace(old_stem, new_stem)
+                    kw = (r["keywords"] or "").replace(old_stem, new_stem)
+                    self.db.execute(
+                        "UPDATE slices SET text_snippet=?, keywords=? WHERE slice_id=?",
+                        (txt, kw, r["slice_id"]),
+                    )
+                    # FTS5 自管表：rowid 是唯一键，必须先删旧行再插新行
+                    # （先插会撞 UNIQUE 约束）
+                    self.db.execute(
+                        "DELETE FROM slices_fts WHERE rowid=?", (r["slice_id"],))
+                    self.db.execute(
+                        "INSERT INTO slices_fts(rowid, text_snippet, keywords) VALUES (?,?,?)",
+                        (r["slice_id"], txt, kw),
+                    )
+            self._invalidate_cache()
+            self._commit()
+            return True
 
     # ------------------------------------------------------------------ #
     # 检索
