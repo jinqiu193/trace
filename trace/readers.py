@@ -7,6 +7,7 @@ image/audio/video reader 先落地为元数据占位（返回空切片列表）�
 
 from __future__ import annotations
 
+import math
 import re
 import zipfile
 from fractions import Fraction
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Iterator
 
 from . import config
+from .log import get_logger
+
+log = get_logger("trace.readers")
 
 
 # --------------------------------------------------------------------- #
@@ -97,14 +101,21 @@ def read_text(path: Path) -> str:
 # --------------------------------------------------------------------- #
 # PDF：逐页产出 (页码, 文本)
 # --------------------------------------------------------------------- #
-def read_pdf_pages(path: Path, max_pages_first: int | None = None) -> Iterator[tuple[int, str]]:
-    """PRD：长文档先索引前 30 页，其余后台懒加载。"""
+def read_pdf_pages(path: Path) -> Iterator[tuple[int, str]]:
+    """逐页产出 (页码, 文本)——全部页面。
+
+    2026-11-05 修：原先这里有"前 30 页先索引、其余后台懒加载"的设计，
+    但调用方把 `max_pages_first=30 if first else None` 写成了实参表达式，
+    实参在循环开始前只求值一次（此刻 first 恒为 True）→ 永远只传 30，
+    31 页之后的内容被静默丢弃、无报错无日志，且增量重跑补不回来
+    （extraction 指纹不变即跳过）。"后台懒加载"在代码里从未存在，
+    故去掉页数上限，全文进索引。
+    """
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
     total = len(reader.pages)
-    limit = total if max_pages_first is None else min(total, max_pages_first)
-    for i in range(limit):
+    for i in range(total):
         try:
             text = reader.pages[i].extract_text() or ""
         except Exception:
@@ -138,11 +149,13 @@ def read_media_meta(path: Path) -> dict:
         try:
             import cv2
             cap = cv2.VideoCapture(str(path))
-            if cap.isOpened():
-                meta["fps"] = cap.get(cv2.CAP_PROP_FPS) or None
-                meta["duration_s"] = (cap.get(cv2.CAP_PROP_FRAME_COUNT) /
-                                       meta["fps"]) if meta["fps"] else None
-            cap.release()
+            try:
+                if cap.isOpened():
+                    meta["fps"] = cap.get(cv2.CAP_PROP_FPS) or None
+                    meta["duration_s"] = (cap.get(cv2.CAP_PROP_FRAME_COUNT) /
+                                           meta["fps"]) if meta["fps"] else None
+            finally:
+                cap.release()   # 异常路径也要释放（Windows 上否则文件被锁住）
         except Exception:
             pass
         return meta
@@ -577,25 +590,42 @@ def iter_video_slices(path: Path, embedder=None, *,
         return
 
     # ---- 1.5 等距 seek（默认，最快）：只 seek N 个等分点取帧，不解全片 ----
+    # 回退语义（2026-11-05 修）：只有"整条路径一个帧都没产出"才换路。
+    # 原先 try 包住 yield from，中途失败时已产出的切片不会撤销，接着又从
+    # 下一条路径从头抽一遍 → 同一文件产出两套时间戳重叠、_reason 混杂的切片。
     if config.VIDEO_SEEK_MODE:
+        produced = 0
         try:
-            yield from _iter_video_seek_slices(
-                path, embedder, max_pixel=max_pixel,
-                max_frames=max_frames, cancel=cancel)
+            for sl in _iter_video_seek_slices(
+                    path, embedder, max_pixel=max_pixel,
+                    max_frames=max_frames, cancel=cancel):
+                produced += 1
+                yield sl
             return
         except Exception:
-            pass  # seek 失败 → 回退下方场景/tick
+            if produced:
+                log.warning("seek 抽帧中途失败（已产出 %d 帧），保留已产出部分不再换路重抽：%s",
+                            produced, path)
+                return
+            # 一帧未产出 → 整条路径失败，回退下方场景/tick
 
     # ---- 1.6 场景模式（seek 关闭时的回退）：关键帧-only 解码 + aHash 场景检测 + 上限抽稀 ----
     if config.VIDEO_SCENE_MODE:
+        produced = 0
         try:
-            yield from _iter_video_scene_slices(
-                path, embedder, max_pixel=max_pixel,
-                ahash_tolerance=ahash_tolerance, max_frames=max_frames,
-                cancel=cancel)
+            for sl in _iter_video_scene_slices(
+                    path, embedder, max_pixel=max_pixel,
+                    ahash_tolerance=ahash_tolerance, max_frames=max_frames,
+                    cancel=cancel):
+                produced += 1
+                yield sl
             return
         except Exception:
-            pass  # 场景路径失败 → 回退下方 tick 均匀采样
+            if produced:
+                log.warning("场景抽帧中途失败（已产出 %d 帧），保留已产出部分不再换路重抽：%s",
+                            produced, path)
+                return
+            # 一帧未产出 → 回退下方 tick 均匀采样
 
     # ---- 2. 步长：固定间隔 OR 等比分到 max_frames（DigUp 公式）----
     step = max(sample_interval_sec, duration_s / max_frames)
@@ -679,51 +709,58 @@ def iter_video_slices(path: Path, embedder=None, *,
                 yield slice_dict
                 out_count += 1
     except Exception:
-        # PyAV 失败（极老编码器/损坏文件）→ 回退 cv2 步进式
+        # 回退语义（2026-11-05 修）：PyAV 中途失败但已产出过帧时，保留已产出
+        # 的部分，不再用 cv2 从头重抽（否则同一文件产出两套重叠切片）。
+        if out_count:
+            log.warning("PyAV 抽帧中途失败（已产出 %d 帧），保留已产出部分不再用 cv2 重抽：%s",
+                        out_count, path)
+            return
+        # PyAV 一帧未产出（极老编码器/损坏文件）→ 回退 cv2 步进式
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
             return
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        last_sig = None
-        out_count = 0
-        for target_t in times:
-            if cancel is not None and cancel.is_set():
-                cap.release()
-                return
-            if out_count >= max_frames:
-                break
-            cap.set(cv2.CAP_PROP_POS_MSEC, target_t * 1000.0)
-            ok, arr = cap.read()
-            if not ok or arr is None:
-                continue
-            sig = _frame_signature(arr, side=config.VIDEO_AHASH_SIDE)
-            if last_sig is not None and _is_same_shot(sig, last_sig, ahash_tolerance):
-                continue
-            last_sig = sig
-            h0, w0 = arr.shape[:2]
-            if max(h0, w0) > max_pixel:
-                scale = max_pixel / max(h0, w0)
-                arr = cv2.resize(arr, (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
-                                 interpolation=cv2.INTER_AREA)
-            rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            slice_dict = {
-                "modality": "video_frame",
-                "location": _format_ts(target_t),
-                "text": "",
-                "keywords": f"{path.stem} t={_format_ts(target_t)}",
-                "_pil": img,
-                "_ts": target_t,
-                "_reason": "fallback",
-            }
-            if embedder is not None:
-                try:
-                    slice_dict["vector"] = embedder.embed_image_pil(img)
-                except Exception:
-                    pass
-            yield slice_dict
-            out_count += 1
-        cap.release()
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            last_sig = None
+            out_count = 0
+            for target_t in times:
+                if cancel is not None and cancel.is_set():
+                    return
+                if out_count >= max_frames:
+                    break
+                cap.set(cv2.CAP_PROP_POS_MSEC, target_t * 1000.0)
+                ok, arr = cap.read()
+                if not ok or arr is None:
+                    continue
+                sig = _frame_signature(arr, side=config.VIDEO_AHASH_SIDE)
+                if last_sig is not None and _is_same_shot(sig, last_sig, ahash_tolerance):
+                    continue
+                last_sig = sig
+                h0, w0 = arr.shape[:2]
+                if max(h0, w0) > max_pixel:
+                    scale = max_pixel / max(h0, w0)
+                    arr = cv2.resize(arr, (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                                     interpolation=cv2.INTER_AREA)
+                rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                slice_dict = {
+                    "modality": "video_frame",
+                    "location": _format_ts(target_t),
+                    "text": "",
+                    "keywords": f"{path.stem} t={_format_ts(target_t)}",
+                    "_pil": img,
+                    "_ts": target_t,
+                    "_reason": "fallback",
+                }
+                if embedder is not None:
+                    try:
+                        slice_dict["vector"] = embedder.embed_image_pil(img)
+                    except Exception:
+                        pass
+                yield slice_dict
+                out_count += 1
+        finally:
+            cap.release()   # 异常路径也要释放（Windows 上否则文件被锁住）
 
 
 # --------------------------------------------------------------------- #
@@ -825,7 +862,17 @@ def iter_audio_windows(path: Path, *,
             n = max(1, min(max_windows, _adaptive_count(
                 duration_s, config.AUDIO_SPAN_SEC,
                 config.AUDIO_MIN_WINDOWS, max_windows)))
-            targets = [duration_s * (i + 0.5) / n for i in range(n)]
+            # 窗数不超过"非重叠窗口能装下几个"：短媒体不该被切成一堆几乎相同
+            # 的向量（20 秒文件原本按 AUDIO_MIN_WINDOWS=4 切出 4 个高度重叠的
+            # 窗 → 4 倍存储 + 4 倍嵌入开销 + 4 条噪声切片）。长媒体不受影响
+            # （2h → ceil(7200/30)=240 ≫ max_windows=10，仍取 10）。
+            n = min(n, max(1, math.ceil(duration_s / window_sec)))
+            if duration_s <= window_sec:
+                # 媒体比一个窗口还短：整段作为一个窗（从 0 开始，不能砍头）
+                n = 1
+                targets = [0.0]
+            else:
+                targets = [duration_s * (i + 0.5) / n for i in range(n)]
             probe_samples = int(2.0 * sr)
             for t in targets:
                 if cancel is not None and cancel.is_set():
@@ -861,14 +908,16 @@ def iter_audio_windows(path: Path, *,
                         break
                     probe_t += 60.0
                 if seg is not None:
-                    yield seg, start, start + window_sec
+                    # 结束时间按实际解码长度算，不能恒用 start+window_sec：
+                    # 尾窗常常不足一个整窗（如 20s 文件里 18s 的窗），
+                    # 恒定写法会让索引里的时间区间声称包含不存在的声音。
+                    yield seg, start, start + len(seg) / sr
             return
 
         # ---- 顺序回退（无总时长）：取前 max_windows 个非静音窗 ----
         resampler = av.AudioResampler(format="s16", layout="mono", rate=sr)
         buffer = np.empty(0, dtype=np.int16)
         offset = 0   # sample 索引（buffer[0] 在文件中的位置）
-        tail_emitted = False
         kept = 0     # 已产出窗口数
 
         def _emit(count: int, start_sample: int) -> np.ndarray:
@@ -900,17 +949,25 @@ def iter_audio_windows(path: Path, *,
                 buffer = buffer[hop_samples:]
                 offset += hop_samples
 
-        # 尾段：上一窗口覆盖到 offset+window_samples-hop_samples，新音频起点 = offset+window_samples-hop_samples
+        # 尾段处理。
+        # 上一个窗口（哪怕因静音被跳过）覆盖到 offset+window_samples-hop_samples
+        # （= offset+already_covered），之后的内容才是新的；buffer[0] 在文件里的
+        # 位置是 offset，所以新内容起点是 buffer[already_covered:]——原先直接
+        # yield buffer.copy() 会把已覆盖的 5 秒又塞进新窗（音频内容与标注的
+        # 时间戳对不上）。
+        # offset == 0 表示一个窗口都没产出过（文件比一个窗还短），此时整段
+        # 都是新内容，不能砍掉开头。
         already_covered = window_samples - hop_samples
-        tail = buffer.size - already_covered
-        if tail >= min_samples:
-            if _rms_int16(buffer[:buffer.size]) > silence_rms:
-                yield buffer.copy(), (offset + already_covered) / sr, (offset + buffer.size) / sr
-            tail_emitted = True
-        # 若文件总长 < window_samples：单独整段发
-        if not tail_emitted and offset == 0 and buffer.size >= min_samples:
-            if _rms_int16(buffer) > silence_rms:
+        if offset == 0:
+            # 整个文件还没产出过窗口：buffer 全部是新内容
+            if buffer.size >= min_samples and _rms_int16(buffer) > silence_rms:
                 yield buffer.copy(), 0.0, buffer.size / sr
+        else:
+            tail = buffer.size - already_covered
+            if tail >= min_samples:
+                new_tail = buffer[already_covered:]
+                if _rms_int16(new_tail) > silence_rms:
+                    yield new_tail.copy(), (offset + already_covered) / sr, (offset + buffer.size) / sr
     except Exception:
         return
     finally:
@@ -982,9 +1039,7 @@ def iter_slices(path: Path, token_counter=None) -> Iterator[dict]:
         if text.strip():
             yield {"modality": kind, "location": "none", "text": text, "keywords": path.name}
     elif kind == "pdf":
-        first = True
-        for page_no, page_text in read_pdf_pages(path, max_pages_first=30 if first else None):
-            first = False
+        for page_no, page_text in read_pdf_pages(path):
             if page_text.strip():
                 yield {"modality": "pdf", "location": f"page:{page_no}", "text": page_text, "keywords": path.name}
     elif kind == "video":

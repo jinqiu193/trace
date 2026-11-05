@@ -94,6 +94,36 @@ def _meaning(cos: np.ndarray, modalities: list[str], std_floor: float = STD_FLOO
     return (centered - mean) / max(std, std_floor)
 
 
+def _nearby_frames(frame_locs: dict[int, list[str]], fid: int, center: float) -> list[dict]:
+    """命中时间点附近的帧（最多 5 张），按时间就近排序。
+
+    抽帧密度低时固定 ±12s 窗口内常常一帧都没有：长视频按
+    VIDEO_SLICE_SPAN_SEC=900 抽帧 → 帧间隔约 15 分钟；而命中时间戳常常
+    来自 video_sound 切片（音轨窗口），与 video_frame 的时间戳不对齐。
+    所以 ±12s 命中不足 3 帧时退化为"时间上最接近的 5 帧"，让用户仍能
+    扫到命中点前后的画面。
+    """
+    parsed: list[tuple[float, str]] = []
+    for loc in frame_locs.get(fid, []):
+        t = _parse_ts(loc)
+        if t is not None:
+            parsed.append((t, loc))
+    if not parsed:
+        return []
+    parsed.sort()
+    near = [(t, loc) for t, loc in parsed if abs(t - center) <= 12.0]
+    if len(near) < 3:
+        near = sorted(parsed, key=lambda x: (abs(x[0] - center), x[0]))[:5]
+    elif len(near) > 5:
+        idx = min(range(len(near)), key=lambda i: abs(near[i][0] - center))
+        lo = max(0, idx - 2)
+        hi = min(len(near), lo + 5)
+        lo = max(0, hi - 5)
+        near = near[lo:hi]
+    near.sort(key=lambda x: x[0])   # 按时间排（前端当时间条展示）
+    return [{"t": t, "loc": loc} for t, loc in near]
+
+
 def _highlight(snippet: str, ts: list[str], width: int = 160) -> str:
     """轻量高亮：把查询词出现位置包上 «»（DigUp snippet 风格），截断到 width。"""
     if not snippet:
@@ -422,10 +452,14 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
     slice_rows = store.slices_by_ids(list(need_sids)) if need_sids else {}
 
     # 视频帧位置批量取（仅 video 命中；fast 模式跳过——无 nearby_frames，省全帧扫描）
+    # 2026-11-05 修：原先条件里带 `item.get("video_loc_ts")`，而 video_loc_ts
+    # 是在其后的组装循环里才赋值的——读取时恒为 None → video_fids 恒空 →
+    # frame_locs 恒 {} → nearby_frames 恒 []（"附近 5 帧"功能整个失效）。
+    # 现在只按 file_type 预取当前页里的视频，命中时间戳在组装阶段再解析。
     frame_locs: dict[int, list[str]] = {}
     if mode != "fast":
-        video_fids = [item["file_id"] for _s, item in page
-                      if item["row"]["file_type"] == "video" and item.get("video_loc_ts")]
+        video_fids = {item["file_id"] for _s, item in page
+                      if item["row"]["file_type"] == "video"}
         for vfid in video_fids:
             frame_locs[vfid] = store.frame_locations(vfid)
 
@@ -484,23 +518,7 @@ def search(store, embedder, query: str, limit: int = 10, offset: int = 0,
         if fr["file_type"] == "video" and item.get("video_loc_ts"):
             center = _parse_ts(item["video_loc_ts"])
             if center is not None:
-                parsed = []
-                for loc in frame_locs.get(fr["file_id"], []):
-                    t = _parse_ts(loc)
-                    if t is not None:
-                        parsed.append((t, loc))
-                parsed.sort()
-                nearby = [(t, loc) for t, loc in parsed if abs(t - center) <= 12.0]
-                if nearby:
-                    if len(nearby) <= 5:
-                        picks = nearby
-                    else:
-                        idx = min(range(len(nearby)), key=lambda i: abs(nearby[i][0] - center))
-                        lo = max(0, idx - 2)
-                        hi = min(len(nearby), lo + 5)
-                        lo = max(0, hi - 5)
-                        picks = nearby[lo:hi]
-                    nearby_frames = [{"t": t, "loc": loc} for t, loc in picks]
+                nearby_frames = _nearby_frames(frame_locs, fr["file_id"], center)
 
         z_v = item["z"]
         if z_v >= 2.0:
@@ -785,21 +803,7 @@ def _pool_search(store, qv, limit: int = 20, offset: int = 0,
         if fr["file_type"] == "video" and location:
             center = _parse_ts(location)
             if center is not None:
-                parsed = sorted(
-                    (t, loc) for t, loc in
-                    [( _parse_ts(l), l) for l in frame_locs.get(fr["file_id"], [])]
-                    if t is not None)
-                nearby = [(t, loc) for t, loc in parsed if abs(t - center) <= 12.0]
-                if nearby:
-                    if len(nearby) <= 5:
-                        picks = nearby
-                    else:
-                        idx = min(range(len(nearby)), key=lambda i: abs(nearby[i][0] - center))
-                        lo = max(0, idx - 2)
-                        hi = min(len(nearby), lo + 5)
-                        lo = max(0, hi - 5)
-                        picks = nearby[lo:hi]
-                    nearby_frames = [{"t": t, "loc": loc} for t, loc in picks]
+                nearby_frames = _nearby_frames(frame_locs, fr["file_id"], center)
 
         confidence = "high" if z_v >= 2.0 else ("medium" if z_v >= 1.0 else "low")
         out.append({

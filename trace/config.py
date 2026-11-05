@@ -138,6 +138,7 @@ FINGERPRINT = (
     "| prompt-title-v1"          # 文档向量带文件名标题
     "| haswords-v1"              # 纯数字文本只进关键词
     f"| chunk{CHUNK_MAX_TOKENS}/ov{CHUNK_OVERLAP_TOKENS}"
+    f"| pdf-allpages-v1"       # PDF 全文索引（原先只索引前 30 页）
     f"| frame{VIDEO_FRAME_TOKENS}/{_FP_FRAME}"
     f"| {_FP_AUDIO}"
     f"| {_FP_IMG_PREFIX}"
@@ -161,6 +162,10 @@ def extraction_fingerprint(kind: str) -> str:
         return core + f"| {_FP_AUDIO}"
     if kind == "image":
         return core + "| ocr-v1"
+    if kind == "pdf":
+        # 2026-11-05：PDF 改为全文索引（原先只索引前 30 页，其余静默丢弃）。
+        # 指纹变化 → 旧库里被截断的 PDF 在增量任务里自动重索。
+        return core + "| pdf-allpages-v1"
     if kind == "code":
         # code 与 text 切片算法一致，但 modality/file_type 不同——独立指纹
         # 让旧库中按 text 索引的代码文件在增量任务里自动重索为 code。

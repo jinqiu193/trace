@@ -92,13 +92,27 @@ def _register_cuda_dlls() -> None:
         pass
 
 
+# --------------------------------------------------------------------------- #
+# C 扩展在**模块级**导入（即随 trace.web 一起在主线程加载），且必须在
+# _register_cuda_dlls() 之后（ORT 的 CUDA EP 要先注册 DLL 目录）。
+#
+# 2026-11-05 修：原本 onnxruntime / tokenizers 是在 Embedder.__init__ 里导入的，
+# 而 Embedder 是被 web.py 的后台预热线程构造的——后台线程导入 C 扩展时会持有
+# GIL 并卡在原生等待里，主线程此时要拿 GIL 去启动 anyio 的工作线程
+# （anyio.run_sync_in_worker_thread → Thread.start）→ 永久死锁：端口 listen 了
+# 但 uvicorn 从不开始服务，所有 API 请求超时（py-spy 看到主线程停在
+# Thread.start、预热线程停在 ExtensionFileLoader.create_module）。
+# 放到模块级后，导入发生在应用导入期（单线程），不再有并发。
+# --------------------------------------------------------------------------- #
+_register_cuda_dlls()
+
+import onnxruntime as ort  # noqa: E402
+from tokenizers import Tokenizer  # noqa: E402
+
+
 class Embedder:
     def __init__(self, model_path=None, tokenizer_path=None, prefer_gpu: bool = True,
                  with_vision: bool = True):
-        _register_cuda_dlls()
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
-
         model_path = model_path or config.MODEL_ONNX
         tokenizer_path = tokenizer_path or config.TOKENIZER_JSON
 
